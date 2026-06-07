@@ -347,9 +347,7 @@ fn run_loop(
 #[cfg(test)]
 #[cfg(feature = "test-utils")]
 mod tests {
-    use crate::{
-        test_utils::{MockLlmClient, MockResponse, NoOpEnv},
-    };
+    use crate::test_utils::{MockLlmClient, MockResponse, NoOpEnv};
     use futures::future::BoxFuture;
     use llm_harness_types::*;
     use std::sync::Arc;

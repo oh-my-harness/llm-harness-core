@@ -61,8 +61,6 @@ pub struct LoopConfig {
 
 #[cfg(test)]
 mod tests {
-    
-    
 
     #[test]
     #[cfg(feature = "test-utils")]
