@@ -13,7 +13,7 @@ async-stream = "0.3"
 async-trait  = "0.1"
 chrono     = { version = "0.4", features = ["serde"] }
 futures    = "0.3"
-llm_adapter = { git = "https://github.com/oh-my-harness/llm-api-adapter", rev = "8c4423f" }
+llm_adapter = { path = "../llm-api-adapter" }
 llm-harness-types = { path = "crates/llm-harness-types" }
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
