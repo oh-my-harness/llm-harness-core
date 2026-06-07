@@ -27,18 +27,29 @@ llm-harness-core/
     └── llm-harness/         (Agent + Harness + Session + Compaction + Skills)
 ```
 
-依赖关系：
+依赖关系（箭头 = "依赖于"，A → B 表示 A 依赖 B）：
 
 ```
-llm-api-adapter  (外部 crate)
-      │
-      ▼
-llm-harness-types  ←──────────────────┐
-      │                               │
-      ▼                               │
-llm-harness-loop               llm-harness
-      │                               │
-      └───────────────►───────────────┘
+llm-harness
+    │                   │
+    ▼                   ▼
+llm-harness-loop    llm-harness-types
+    │                   │
+    ▼                   (无外部依赖)
+llm-api-adapter (外部 crate)
+llm-harness-types (同上)
+```
+
+简化视图：
+```
+                  llm-harness
+                  /          \
+      llm-harness-loop    llm-harness-types
+          /        \
+llm-api-adapter  llm-harness-types
+
+注：llm-harness 通过 loop 的 pub use 获得 LlmClient / ModelInfo，
+    不直接依赖 llm-api-adapter。
 ```
 
 ## 模块文档导航

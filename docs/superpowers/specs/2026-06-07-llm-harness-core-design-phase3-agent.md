@@ -89,7 +89,8 @@ let stream = agent_loop(client, build_ctx(&snapshot, ...), cfg); // await 期间
 pub async fn prompt(&self, text: impl Into<String>) -> Result<(), AgentError>;
 /// 支持直接传入消息序列（如恢复会话）
 pub async fn prompt_with_messages(&self, messages: Vec<AgentMessage>) -> Result<(), AgentError>;
-/// 从当前 transcript 继续执行（无新输入）——AgentHarness::next_turn 的基础
+/// 从当前 transcript 继续执行（无新输入）——Harness 通过 `agent_loop_continue()` 实现等效功能。
+/// Agent 的 `continue_run()` 是独立使用 Agent（不通过 Harness）时的入口。
 pub async fn continue_run(&self) -> Result<(), AgentError>;
 /// 清空 transcript 与运行时状态（保留 model/tools 等配置）
 pub fn reset(&self);
@@ -133,7 +134,9 @@ pub async fn wait_for_idle(&self);
 >
 > **队列操作（任何阶段安全）：** `steer`/`follow_up` 及其变体。文本版本 `steer(&str)` 是便捷方法——内部构造 `UserMessage` 后走 `steer_message`。这允许简单场景（纯文本 steer）的一行调用，同时保留多模态消息的完整能力。
 >
-> **`abort` 方法：** 触发 `CancellationToken`，清空队列。注意——`abort` 后 agent 可能需要一些时间才能真正停止（正在执行的 tool 需要响应取消信号）。调用方应在 `abort()` 后 `await wait_for_idle()` 确保完全停止。
+> **`abort` 方法：** 触发 `CancellationToken`（与 `ToolContext.abort` 共享同一个 token——tool 执行期间检查此 token），清空 steer/follow-up 队列，等待 loop 自然退出（正在执行的 tool 收到取消信号后尽快返回 `ToolError::Aborted`）。调用方应在 `abort()` 后 `await wait_for_idle()` 确保完全停止。
+>
+> **`clear_all_queues()` 语义：** 清空 steer + follow-up 队列。**不**清空 `queued_next_turn`（Agent 无此字段——仅 AgentHarness 有）。Agent 的 `clear_all_queues` 仅影响 steer/follow-up 两个 channel。
 >
 > **观测方法：** `state()` 返回 `AgentState` 的快照（clone）——避免调用方持锁。`subscribe()` 返回新的 `broadcast::Receiver`——调用方独立 poll，互不干扰。
 

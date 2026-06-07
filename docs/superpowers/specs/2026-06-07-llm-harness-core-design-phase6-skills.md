@@ -1,6 +1,6 @@
 ### 5.5 Skills 与 PromptTemplates
 
-> **Skills 和 PromptTemplates 是什么？** Skills 是框架加载的 Markdown 文件——包含特定任务的详细指令（如 "如何写 commit message"、"如何部署到 K8s"）。它们被注入到 LLM 的 system prompt 中，LLM 可以自主决定何时调用哪个 skill。PromptTemplates 是参数化的 prompt 模板——调用方可以通过名称 + 参数快速构造标准化的 prompt。
+> **Skills 和 PromptTemplates 是什么？** Skills 是框架加载的 Markdown 文件——包含特定任务的详细指令（如 "如何写 commit message"、"如何部署到 K8s"）。它们被注入到 LLM 的 system prompt 中，LLM 可以自主决定何时调用哪个 skill。PromptTemplates 是供**调用方**使用的参数化 prompt 模板——应用层或 UI 层通过名称 + 参数把模板展开成完整的用户消息文本，再发给 agent；LLM 看不到模板本身，只看到展开后的结果。
 
 ---
 
@@ -90,33 +90,56 @@ pub fn format_skill_invocation(skill: &Skill, additional_instructions: Option<&s
 
 #### PromptTemplates
 
-**位置参数 + shell-style 引号解析**，对齐 pi-agent-core：占位符 `$1`、`$2`、`$@`、`$ARGUMENTS`、`${@:N}`、`${@:N:L}`。
+> **PromptTemplates 是什么？** PromptTemplate 是带位置参数占位符的 Markdown 文件，供**调用方**（应用层或 UI 层）在运行时展开成完整的用户 prompt 文本。
+>
+> 它解决的问题：许多场景中 prompt 有固定结构但存在可变部分（如目标环境、文件路径、任务描述），每次手写完整 prompt 效率低。PromptTemplate 把结构固定下来，调用方只提供参数。
+>
+> **与 Skills 的关键区别：**
+>
+> | | Skills | PromptTemplates |
+> |---|---|---|
+> | 消费者 | **LLM**（注入 system prompt，LLM 自主选择何时使用） | **调用方**（应用/UI，按名称显式展开） |
+> | 内容 | 任务指令（"如何做某件事"）| prompt 模板（"做什么"+ 参数填空）|
+> | 注入时机 | loop 启动时注入 system prompt | 调用方显式调用展开函数时 |
+> | 输出 | 成为 LLM 的指令上下文 | 成为发给 agent 的用户消息文本 |
+>
+> **典型调用流程：**
+> 1. 调用方注册模板：`harness.set_resources(HarnessResources { prompt_templates: load_prompt_templates(...), ... })`
+> 2. 调用 `invoke_template(template, args)` 展开占位符，得到完整的 prompt 字符串
+> 3. 将展开后的字符串作为 `UserMessage` 发给 agent（`harness.prompt(expanded_text)`），开始一轮对话
 
 ```rust
 pub struct PromptTemplate {
-    pub name:    String,
-    pub content: String,
-    pub source:  PathBuf,
+    pub name:        String,
+    /// UI 显示用描述。从 frontmatter `description` 字段提取；若无 frontmatter，
+    /// 则取 body 首行非空内容（截断至 60 字符）。
+    pub description: String,
+    pub content:     String,
+    pub source:      PathBuf,
 }
+
+/// parse_command_args: 将用户输入字符串做 shell-style 引号解析，拆分为 args 列表。
+/// 调用方在把用户输入传给 invoke_template 之前先调用此函数。
+pub fn parse_command_args(input: &str) -> Vec<String>;
 
 pub async fn load_prompt_templates(
     env:  &dyn ExecutionEnv,
     dirs: &[PathBuf],
 ) -> (Vec<PromptTemplate>, Vec<SkillDiagnostic>);
 
-/// args 为位置参数列表；invoke 内部 shell-style 解析输入
+/// 用位置参数展开模板，执行纯文本替换，不涉及 I/O。
 pub fn invoke_template(
     template: &PromptTemplate,
     args:     &[String],
-) -> Result<String, TemplateError>;
+) -> String;
 ```
 
 > **为什么是位置参数（`$1`, `$2`）而非命名参数（`{{name}}`）？** 对齐 pi-agent-core 的现有模板生态。位置参数配合 shell-style 引号解析允许模板像命令行工具一样使用：
 > ```
-> /deploy staging "update API endpoint" --dry-run
-> → args = ["staging", "update API endpoint", "--dry-run"]
-> → template: "Deploy to $1 environment. Task: $2. Flags: ${@:3}"
-> → result: "Deploy to staging environment. Task: update API endpoint. Flags: --dry-run"
+> 用户输入：staging "update API endpoint" --dry-run
+> parse_command_args → ["staging", "update API endpoint", "--dry-run"]
+> 模板内容："Deploy to $1 environment. Task: $2. Flags: ${@:3}"
+> invoke_template → "Deploy to staging environment. Task: update API endpoint. Flags: --dry-run"
 > ```
 >
 > **占位符语法：**
@@ -124,13 +147,48 @@ pub fn invoke_template(
 > - `$@` 或 `$ARGUMENTS`：所有参数以空格连接
 > - `${@:N}`：从第 N 个参数开始的所有参数
 > - `${@:N:L}`：从第 N 个参数开始的 L 个参数
+> - 参数不足时缺失的占位符替换为空字符串（不报错）
 >
-> **shell-style 引号解析：** `args` 通常是用户输入的字符串拆分结果。双引号和单引号用于包裹含空格的参数。`invoke_template` 接收已经解析好的 `&[String]`——调用方负责解析引号。
+> **shell-style 引号解析（`parse_command_args`）：** 双引号和单引号用于包裹含空格的参数，引号本身不出现在结果中。`invoke_template` 接收已经解析好的 `&[String]`，调用方负责先调用 `parse_command_args`。
 >
-> **为什么 `invoke_template` 是同步函数？** 参数替换是纯字符串操作——不涉及 I/O，不需要 async。
+> **`invoke_template` 为什么不返回 `Result`？** 参数不足时缺失占位符静默替换为空字符串——这是对齐 TS 版行为的有意设计，调用方不需要处理错误路径。`invoke_template` 是纯文本替换，不涉及 I/O，无需 async。
+>
+> **`description` 字段的推断规则：** (1) 优先使用 frontmatter `description` 字段；(2) 若无 frontmatter 或 description 为空，取 body 首行非空内容，截断至 60 字符（超出追加 `...`）。`description` 仅用于 UI 显示（如命令面板的提示文字），不进入展开结果。
 
 ---
 
 **测试策略：** Skills 和 Templates 的加载逻辑依赖 `dyn ExecutionEnv`。v1 **不**提供 `InMemoryEnv` mock——测试通过 `tempfile::TempDir` + `OsEnv` 真实运行：在临时目录布置 `SKILL.md` / 模板文件，调用 `load_skills()`，验证返回值。这样既覆盖了真实 fs 行为，又避免维护双重 env 实现。后续若需要 hermetic 测试再引入 `InMemoryEnv`。
 
 > **为什么选择真实 fs 测试而非 mock？** mock `ExecutionEnv` 需要维护一个 "虚拟文件系统"——与真实文件系统的行为可能微妙不同（路径分隔符、符号链接解析、权限检查）。`tempfile` crate 提供隔离的临时目录，配合真实的 `OsEnv` 实现——测试运行在真实环境中，但互不干扰。代价是测试依赖文件系统（在 CI 中可用），但避免了 mock 维护成本。
+
+---
+
+**SKILL.md 文件规范：**
+
+```
+---
+name: my-skill              # 必填；小写字母+数字+连字符，≤64，匹配父目录名
+description: Brief summary  # 必填；非空，≤1024 字符
+disable-model-invocation: false  # 可选；默认 false
+label: "My Skill"           # 可选；UI 友好名
+---
+Skill body content here...
+```
+
+**字段说明：** 所有 frontmatter 字段使用 `kebab-case`（YAML 惯例）。`name` 缺省时从父目录名推断（会产生 warning 如果父目录名不符合规范）。`description` 为空或缺省时 skill 被跳过（产生 diagnostic）。`---` 分隔符后第一行非空行开始为 skill body（content 字段）。Body 中的相对路径以 SKILL.md 所在目录为基准解析。
+
+**PromptTemplate 文件规范：**
+
+模板文件命名约定：`<name>.md`（name = 不含扩展名的文件名）。模板名称来源于文件名。
+
+支持可选的 YAML frontmatter：
+
+```
+---
+description: Deploy to a target environment  # 可选；UI 提示文字
+argument-hint: "<env> <task>"               # 可选；提示调用方应传哪些参数（纯 UI 提示，不影响展开逻辑）
+---
+Deploy to $1 environment. Task: $2. Extra flags: ${@:3}
+```
+
+若无 frontmatter（或 frontmatter 中无 `description`），`description` 自动取 body 首行内容（截断至 60 字符）。加载算法与 Skills 不同：不递归子目录（仅加载目录下的直接 `.md` 文件），文件名即模板名，无名称格式校验。

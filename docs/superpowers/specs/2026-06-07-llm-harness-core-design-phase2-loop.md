@@ -6,6 +6,21 @@
 
 > **"纯函数式"的含义：** `agent_loop()` 是一个纯异步函数——输入是 `Arc<dyn LlmClient>` + `AgentContext` + `LoopConfig`，输出是 `impl Stream<Item = AgentEvent>`。它不访问全局状态、不写文件、不持有内部可变状态。所有的状态（当前上下文、model 配置、工具列表）通过参数传入，通过事件流出。这使得 loop 天然可测试——给定相同的输入和 mock client，输出的事件序列是确定性的。
 
+**StreamEvent → AgentEvent 映射表：** loop 内部将 `LlmClient` 返回的 `StreamEvent` 转换为 `AgentEvent`：
+
+| `StreamEvent` | `AgentEvent` | 备注 |
+|---|---|---|
+| `MessageStart { id, model, provider, api }` | `MessageStart { message_id: id }` ，同时记录 model/provider/api 用于后续 `AssistantMessage` 构造 | model/provider/api 最终进入 MessageEnd 的 AssistantMessage 字段 |
+| `TextDelta { text }` | `TextDelta { message_id, text }` | message_id 关联当前 active message |
+| `ThinkingDelta { thinking, signature }` | `ThinkingDelta { message_id, thinking, signature }` | signature 透传，None 亦可 |
+| `ToolUseStart { id, name }` | `ToolCallStart { message_id, tool_use_id: id, name }` | |
+| `ToolUseDelta { id, partial_input }` | `ToolCallArgsDelta { tool_use_id: id, partial_input }` | |
+| `ToolUseEnd { id, input }` | `ToolCallEnd { tool_use_id: id, args: input }` | |
+| `MessageEnd { stop_reason, usage }` | `MessageEnd { message_id, message: AssistantMessage { stop_reason, usage, model, provider, api, ... } }` | 在此构造完整的 AssistantMessage |
+| `Error(e)` | `Error(AgentError::Provider(e.to_string()))` | follow by AgentEnd |
+
+**`agent_loop_continue` 的初始 steer 处理：** 若 loop 启动前 steer channel 中已有消息（前一轮遗留），`agent_loop_continue` 在第一轮 LLM 调用前执行一次 steer poll，清空所有 pending steer 消息。这避免前一轮的 steer 在 continue 场景中被意外注入（continue 应仅处理 follow-up，steer 属于上一轮已结束的上下文）。
+
 **重导出（必需）：** 下游 `llm-harness` 不直接依赖 `llm-api-adapter`；loop 通过 `pub use` 暴露下游需要的类型：
 
 ```rust
@@ -182,9 +197,11 @@ pub fn agent_loop_continue(
 
 > - `LoopConfig` 是 loop 层的**直接 API**。不通过 Harness 的调用方（如希望自行编排会话的低层用户）直接构造 `LoopConfig`
 > - `AgentHarness` 内部维护 `HarnessHooks`，每次启动 loop 时**根据 HarnessHooks 与当前状态构造 LoopConfig**：
->   - `convert_to_llm` / `transform_context` / `prepare_next_turn` / `should_stop` / `before_provider_request` / `after_provider_response` / `auth` 直接复制
+>   - `convert_to_llm` 从 `AgentHarness.convert_to_llm` 字段（独立字段，不在 HarnessHooks 中）
+>   - `auth` 从 `AgentHarness.auth` 字段（独立字段，不在 HarnessHooks 中）
+>   - `transform_context` / `prepare_next_turn` / `should_stop` / `before_provider_request` / `after_provider_response` 从 HarnessHooks 复制
 >   - `tools` 从 `HarnessState.tools` + `active_tools` 过滤，并用 `HookedTool` 包装注入 `before_tool_call` / `after_tool_call`
->   - `steer_rx` / `follow_up_rx` 从 Harness 自己持有的 channel sender 派生 receiver
+>   - `steer_rx` / `follow_up_rx` 从 Harness 自己持有的 channel sender 派生 receiver（channel 容量默认 256；满时 sender 阻塞，调用方的 steer()/follow_up() 感知背压）
 > - 调用方**不应**在 Harness 已设置 HarnessHooks 时再手动构造 LoopConfig；Harness 的 API 完全屏蔽 LoopConfig
 >
 > **为什么 HarnessHooks 和 LoopConfig 分开？** HarnessHooks 是 "存储格式"——保存在 Harness 中，跨多次 prompt 调用复用。LoopConfig 是 "传输格式"——每次调用 `agent_loop()` 时从 HarnessHooks 构造，包含当前 turn 的特定信息（tools 过滤、steer channel 派生）。这种分离避免了在 Harness 中存储 "临时状态"（如某次 turn 的 steer receiver）。
@@ -200,12 +217,11 @@ Harness 通过 `HookedTool` 在每个 tool 上挂载 `before_tool_call` / `after
 ```rust
 /// 包装一个 Tool，在 execute 时调用 before/after 钩子。
 /// Harness 在每次启动 loop 前为每个工具创建一个 HookedTool 实例。
+/// 无状态——turn_index 和 assistant_message 均通过 ToolContext 传入，不存储在结构体中。
 pub struct HookedTool {
-    pub inner:        Arc<dyn Tool>,
-    pub before:       Option<Arc<dyn BeforeToolCallHook>>,
-    pub after:        Option<Arc<dyn AfterToolCallHook>>,
-    pub turn_index:   u32,
-    pub assistant_message: Arc<AssistantMessage>,  // 由 Harness 在 turn 开始注入
+    pub inner:  Arc<dyn Tool>,
+    pub before: Option<Arc<dyn BeforeToolCallHook>>,
+    pub after:  Option<Arc<dyn AfterToolCallHook>>,
 }
 
 impl Tool for HookedTool {
@@ -218,7 +234,11 @@ impl Tool for HookedTool {
     {
         Box::pin(async move {
             let effective_args = if let Some(h) = &self.before {
-                match h.on_call(BeforeToolCallCtx { /* ... */ }).await {
+                match h.on_call(BeforeToolCallCtx {
+                    assistant_message: &ctx.assistant_message,
+                    turn_index: ctx.turn_index,
+                    /* tool_use_id, tool_name, args, ... */
+                }).await {
                     BeforeToolCallDecision::Allow => args,
                     BeforeToolCallDecision::Modify(a) => a,
                     BeforeToolCallDecision::Deny(r) => return Ok(r),
@@ -226,7 +246,14 @@ impl Tool for HookedTool {
             } else { args };
             let result = self.inner.execute(effective_args.clone(), ctx).await;
             if let Some(h) = &self.after {
-                h.on_complete(AfterToolCallCtx { /* result: &result, ... */ }).await;
+                let decision = h.on_complete(AfterToolCallCtx {
+                    assistant_message: &ctx.assistant_message,
+                    turn_index: ctx.turn_index,
+                    /* result: &result, ... */
+                }).await;
+                if let AfterToolCallDecision::Patch(patch) = decision {
+                    return Ok(apply_patch(result, patch));
+                }
             }
             result
         })
@@ -238,11 +265,9 @@ impl Tool for HookedTool {
 >
 > **Decorator 模式：** HookedTool 实现了 `Tool` trait，对外部（loop）来说它就是一个普通的 Tool。loop 不需要知道 hook 的存在——它只调用 `tool.execute()`。Hook 的注入是透明的。
 >
-> **为什么 `assistant_message` 存储在 HookedTool 中？** `before_tool_call` 和 `after_tool_call` 的 context 需要知道 "是哪个 assistant message 触发了这次 tool call"。LLM 的回复在 loop 流式处理后变为完整的 `AssistantMessage`——Harness 在构造 HookedTool 时把它注入。注意这里用 `Arc<AssistantMessage>`——同一个 assistant message 可能触发多个 tool call，所有 HookedTool 共享同一份数据。
+> **为什么 `assistant_message` 和 `turn_index` 不存储在 HookedTool 中？** `assistant_message` 不是工具的属性，而是本次 tool call 的上下文——它在 `build_loop_config()` 时（loop 启动前）根本不存在，只有 loop 内部处理 `MessageEnd` 后才完整。将它放在 `HookedTool` 结构体意味着要么延迟注入（`Arc<RwLock<Option<...>>>`，额外管理负担），要么 per-turn 重建 `HookedTool`（打破 loop 的纯函数特性）。正确的位置是 `ToolContext`：loop 在 `MessageEnd` 后持有完整的 `AssistantMessage`，构造 `ToolContext` 时直接传入。`HookedTool.execute` 从 `ctx.assistant_message` 和 `ctx.turn_index` 读取，再填入 `BeforeToolCallCtx` / `AfterToolCallCtx`——无共享可变状态，`HookedTool` 保持无状态纯 decorator。
 >
-> **`turn_index` 字段：** 告诉 hook 当前是第几轮——hook 可以用它做 "前 3 轮不需要确认" 之类的策略。
->
-> **execute 中的逻辑流程：** (1) 调用 before hook → Allow/Modify/Deny；(2) 如果 Deny，直接返回 hook 提供的 ToolResult（不执行内部 tool）；(3) 否则用 (可能被修改的) args 执行内部 tool；(4) 调用 after hook（观察者，不改变结果）；(5) 返回内部 tool 的结果。
+> **execute 中的逻辑流程：** (1) 调用 before hook → Allow/Modify/Deny，hook ctx 中的 `assistant_message` 和 `turn_index` 来自 `ctx`；(2) 如果 Deny，直接返回 hook 提供的 ToolResult（不执行内部 tool）；(3) 否则用 (可能被修改的) args 执行内部 tool；(4) 调用 after hook，传入结果；(5) after hook 可返回 `AfterToolCallDecision::Patch` 覆盖结果，或 `Passthrough` 保持原样；(6) 返回最终结果。
 >
 > **`effective_args.clone()` 的必要性：** `execute` 的 `args` 参数是 owned `serde_json::Value`——如果 before hook 返回 Allow，我们仍需要原始的 args。但 Modify 返回了新 args，所以不需要 clone 原始的。clone 只发生在 Allow 路径——这是正确的折中。
 >

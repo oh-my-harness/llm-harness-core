@@ -55,6 +55,7 @@ pub struct HarnessState {
     pub pending_tool_calls: HashSet<String>,
     pub pending_session_writes: Vec<SessionEntryPayload>, // 运行中延迟写入
     pub queued_next_turn:  Vec<AgentMessage>,           // next_turn 缓冲：下次 prompt 时合并到初始消息
+    pub error_message:     Option<String>,              // 最近一次 LLM 失败的错误文本（用于诊断）
 }
 
 // HarnessPhase 定义在 §3.1（types crate）以便 HarnessError::NotIdle 携带
@@ -69,9 +70,8 @@ pub struct HarnessState {
 >
 > **AgentState 独有（HarnessState 没有）：**
 > - `messages: Vec<AgentMessage>`——Agent 自己管理消息历史。Harness 从 session 读取历史。
-> - `error_message: Option<String>`——Agent 的独立错误追踪。Harness 通过事件的 error 处理来追踪，不需要独立字段。
 >
-> **共享字段：** `phase`、`model`、`model_info`、`thinking_level`、`tools`、`system_prompt`、`streaming_message`、`pending_tool_calls`。
+> **共享字段：** `phase`、`model`、`model_info`、`thinking_level`、`tools`、`system_prompt`、`streaming_message`、`pending_tool_calls`、`error_message`。
 
 ---
 
@@ -82,6 +82,7 @@ pub struct HarnessState {
 /// convert_to_llm 不在 HarnessHooks 中——它是 loop crate 定义的 trait，
 /// Harness 在 new() 时接受一份 Arc<dyn ConvertToLlmHook> 字段保存，构造 LoopConfig 时填入。
 pub struct HarnessHooks {
+    pub before_run:               Option<Arc<dyn BeforeRunHook>>,        // 对应 TS 的 BeforeAgentStartEvent
     pub before_turn:              Option<Arc<dyn BeforeTurnHook>>,
     pub after_turn:               Option<Arc<dyn AfterTurnHook>>,
     pub before_tool_call:         Option<Arc<dyn BeforeToolCallHook>>,
@@ -108,23 +109,34 @@ pub struct HarnessHooks {
 ```rust
 pub enum AgentHarnessEvent {
     Agent(AgentEvent),
-    PhaseChange       { from: HarnessPhase, to: HarnessPhase },
-    ModelUpdate       { from: String, to: String },
+    PhaseChange         { from: HarnessPhase, to: HarnessPhase },
+    ModelUpdate         { from: String, to: String },
     ThinkingLevelUpdate { from: ThinkingLevel, to: ThinkingLevel },
-    ToolsUpdate       { added: Vec<String>, removed: Vec<String> },
-    ActiveToolsUpdate { active: Option<HashSet<String>> },
-    ResourcesUpdate   { skills: usize, templates: usize, diagnostics: Vec<SkillDiagnostic> },
-    SessionInfoUpdate { name: String },
-    CompactionStart   { estimated_tokens: usize },
-    CompactionEnd     { stats: Option<CompactionStats>, error: Option<String> },
-    QueueUpdate       { steer_len: usize, follow_up_len: usize },
-    SavePoint         { entries_flushed: usize },
-    BranchForked      { from: EntryId, new_leaf: EntryId, label: Option<String> },
-    BranchSwitched    { from: EntryId, to: EntryId },
-    BranchDeleted     { leaf: EntryId },
-    BranchSummarized  { leaf: EntryId, summary: String },
+    ToolsUpdate         { added: Vec<String>, removed: Vec<String> },
+    ActiveToolsUpdate   { active: Option<HashSet<String>> },
+    ResourcesUpdate     { skills: usize, templates: usize, diagnostics: Vec<SkillDiagnostic> },
+    SessionInfoUpdate   { name: String },
+    CompactionStart     { estimated_tokens: usize },
+    CompactionEnd       { stats: Option<CompactionStats>, error: Option<String> },
+    QueueUpdate         { steer_len: usize, follow_up_len: usize },
+    SavePoint           { entries_flushed: usize },
+    BranchForked        { from: EntryId, new_leaf: EntryId, label: Option<String> },
+    BranchSwitched      { from: EntryId, to: EntryId },
+    BranchDeleted       { leaf: EntryId },
+    BranchSummarized    { leaf: EntryId, summary: String },
+    /// tool 开始执行时发出（before hook 之后、inner.execute 之前）。
+    /// 携带 BeforeToolCallHook 可能修改后的最终 args。
+    ToolCallStart       { tool_use_id: String, tool_name: String, args: serde_json::Value },
+    /// tool 执行完毕时发出（after hook 之后）。携带最终结果（after hook 可能已 Patch）。
+    ToolCallEnd         { tool_use_id: String, tool_name: String, result: ToolCallResult },
     Aborted,
     Settled,
+}
+
+pub struct ToolCallResult {
+    pub content:  Vec<ContentBlock>,
+    pub details:  serde_json::Value,
+    pub is_error: bool,
 }
 
 pub struct CompactionStats {
@@ -148,9 +160,11 @@ pub struct CompactionStats {
 >
 > **分支事件（BranchForked / BranchSwitched / BranchDeleted / BranchSummarized）：** 分支生命周期通知。UI 可以据此刷新分支列表或显示通知。
 >
+> **ToolCallStart / ToolCallEnd：** 工具调用的开始与结束通知，用于日志、监控、UI 进度展示。`ToolCallStart` 在 before hook 决策（Allow/Modify/Deny）之后、inner tool 执行之前发出，携带最终生效的 args（可能已被 before hook 修改）。`ToolCallEnd` 在 after hook 决策之后发出，携带最终结果（可能已被 after hook Patch）。这两个是纯观察者事件——功能上与 `BeforeToolCallHook` / `AfterToolCallHook` 互补：hook 在构造时注入、可修改行为；这两个事件支持运行时动态订阅、只能观察。`ToolCallResult` 单独定义而非复用 `ToolResult`，是因为事件需要携带 `is_error` 标志（`ToolResult` 通过 `Result<ToolResult, ToolError>` 在 trait 层面区分成功与失败，不需要显式字段）。
+>
 > **Aborted / Settled：** AgentHarness 的生命周期边界——`Aborted` 在 `abort()` 完成后发出，`Settled` 在一次完整运行（prompt → AgentEnd）结束后发出。
 >
-> **为什么归并为 17 种变体而非 TS 的 20+？** TS 为每个 hook 点提供了独立事件类型（`before_agent_start`、`context`、`before_provider_request`...），总共 20+。Rust 的 Harness 事件更聚焦于 "状态变更通知" 而非 "hook 调用点"。调用方需要响应状态变更——模型变了、队列变了、分支变了。Hook 调用点是框架内部流程——调用方通过实现 trait 参与，不需要事件通知。
+> **与 TS 事件系统的对比：** TS 的 `AgentHarnessEvent` 把 "hook 调用点"（`before_agent_start`、`context`、`before_provider_request` 等，handler 可返回值修改行为）和 "纯通知"（`tool_call`、`model_update` 等）混入同一个事件系统。Rust 将两者分离：hook 调用点通过 `HarnessHooks` 的 trait 实现参与（构造时注入，有类型安全的返回值），纯通知通过 `AgentHarnessEvent` 订阅（运行时动态，无返回值）。TS 的 `before_provider_payload`（修改原始 HTTP payload）和 `after_provider_response`（观察 HTTP 响应头）未在 Rust 版中对应——前者过于底层且与 llm-api-adapter 的封装层冲突，后者（rate limit header 解析等）留给 llm-api-adapter 层处理。
 
 ---
 
@@ -188,13 +202,22 @@ pub async fn generate_branch_summary(&self, leaf: EntryId)
     -> Result<BranchSummaryEntry, HarnessError>;
 
 // === 队列：任何阶段均安全 ===
+/// Idle 时调用 steer/follow_up 将积累在队列中，下次 prompt() 启动时作为初始 steer 注入。
+/// 若需避免此行为，调用方应在 Idle 时避免调用或手动 clear 队列。
 pub fn steer(&self, text: impl Into<String>);
 pub fn follow_up(&self, text: impl Into<String>);
+/// 多模态版本——支持注入含图片等复杂内容的 AgentMessage
+pub fn steer_message(&self, msg: AgentMessage);
+pub fn follow_up_message(&self, msg: AgentMessage);
 pub fn next_turn(&self, text: impl Into<String>);  // turn 边界注入
+/// 多模态版本
+pub fn next_turn_message(&self, msg: AgentMessage);
 pub fn clear_steering_queue(&self);
 pub fn clear_follow_up_queue(&self);
-pub fn clear_all_queues(&self);
+pub fn clear_all_queues(&self);       // 含 steer + follow-up + next_turn
 pub fn has_queued_messages(&self) -> bool;
+/// 触发 CancellationToken，清空 steer/follow-up 队列，等待 loop 停止后发出 Aborted 事件。
+/// 调用方应在 abort() 后 await wait_for_idle() 确保完全停止。
 pub fn abort(&self);
 
 // === 观测 ===
@@ -277,7 +300,7 @@ async fn run_loop(&self, initial_messages: Vec<AgentMessage>) -> Result<()> {
     let built = self.session.build_context().await?;
     let ctx = AgentContext {
         system_prompt: self.compose_system_prompt(),  // 含 skills
-        messages: built.messages.into_iter().chain(initial_messages).collect(),
+        messages: built.messages.into_iter().chain(initial_messages.clone()).collect(),
     };
 
     // 3. 构造 LoopConfig（从 HarnessHooks + state）
@@ -291,7 +314,19 @@ async fn run_loop(&self, initial_messages: Vec<AgentMessage>) -> Result<()> {
 
     while let Some(event) = stream.next().await {
         match event {
+            AgentEvent::AgentStart { ref initial_messages } => {
+                // 将初始消息写入 pending（含用户 prompt、queued next_turn 等）
+                for msg in initial_messages {
+                    self.push_pending_write(SessionEntryPayload::Message(msg.clone()));
+                }
+                self.emit(AgentHarnessEvent::Agent(event));
+            }
             AgentEvent::TurnStart { index } => {
+                // 调用 before_turn hook（在 turn 真正开始前）
+                let snapshot = self.create_turn_snapshot();
+                if let Some(h) = &self.hooks.before_turn {
+                    h.before_turn(BeforeTurnCtx { turn_index: index, snapshot: &snapshot }).await;
+                }
                 self.emit(AgentHarnessEvent::Agent(event));
             }
             AgentEvent::MessageEnd { ref message, .. } => {
@@ -313,7 +348,12 @@ async fn run_loop(&self, initial_messages: Vec<AgentMessage>) -> Result<()> {
                 ));
                 self.emit(AgentHarnessEvent::Agent(event));
             }
-            AgentEvent::TurnEnd { .. } => {
+            AgentEvent::TurnEnd { index, ref message, ref tool_results } => {
+                // 调用 after_turn hook（在 flush 之前，确保 hook 能看到本轮所有消息）
+                let new_messages: Vec<AgentMessage> = /* 本轮新增消息（从 pending writes 提取） */;
+                if let Some(h) = &self.hooks.after_turn {
+                    h.after_turn(AfterTurnCtx { turn_index: index, new_messages: &new_messages }).await;
+                }
                 // Save point: flush pending session writes 到 storage
                 let flushed = self.flush_pending_writes().await?;
                 self.emit(AgentHarnessEvent::SavePoint { entries_flushed: flushed });
@@ -363,3 +403,7 @@ async fn run_loop(&self, initial_messages: Vec<AgentMessage>) -> Result<()> {
 > **"反向引用"的安全实现：** Harness 提供的默认 prepare_next_turn wrapper 在闭包中持有 `Arc<Mutex<HarnessState>>`——这是 Harness 自己持有的同一个 Arc。当 loop 调用 hook 时，wrapper 短暂持锁读取需要的字段（`active_tools`、`model`、`thinking_level`），立即释放锁，然后返回 directive。不跨 await 持锁——安全。
 >
 > **用户提供的 hook 与默认 wrapper 的链式：** 如果用户在 `HarnessHooks.prepare_next_turn` 中提供了自定义 hook，Harness 会在默认 wrapper **之后**调用它——用户的 hook 可以进一步覆盖默认 directive。这允许用户拦截并修改 "从 session 恢复的配置"。
+
+---
+
+**配置变更的时序说明：** Turning 阶段调用 `set_model()`/`set_tools()` 等时，配置变更通过 `pending_session_writes` 缓冲，在 turn 结束时 flush 到 session log。但当前 turn 实际使用的是旧配置（因为 TurnSnapshot 在 turn 开始前已 clone）。这意味着 **session replay 时的配置与实际执行轮次存在一轮的时间差**——对重建上下文而言，这是有意设计：session log 记录的是 "此轮开始前生效的配置"，而非 "此轮执行中变更的配置"。AgentHarness 在重放 session 时按 entry 顺序应用配置变更，就能准确还原每轮开始时的配置状态。

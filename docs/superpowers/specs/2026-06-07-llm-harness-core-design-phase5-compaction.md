@@ -109,8 +109,8 @@ pub struct FileOperation {
 > 4. 判断是否超过阈值：`estimated_tokens > model_info.context_window - settings.reserve_tokens`。
 > 5. 如果未超过，返回 `None`（不需压缩）。
 > 6. 如果超过，从后向前扫描 entries，累计 token 直到达到 `keep_recent_tokens`——找到 cut point。
-> 7. 验证 cut point 落在有效的 entry 边界上（不能是 toolResult 中间）。
-> 8. 如果 cut point 落在 turn 中间，标记 `split_turn_prefix`。
+> 7. 验证 cut point 合法性。**Turn 边界：** 一条 UserMessage + 一条 AssistantMessage + 其所有 ToolResultMessage。**合法 cut point：** UserMessage（或其等价物，如 BranchSummary）之前；或 CompactionEntry 之后。**不合法：** ToolResultMessage 之前（孤立的 tool result）。若不合法，向前（向更旧方向）移动到最近的合法边界。
+> 8. 如果调整后的 cut point 落在 turn 中间（分割了完整的 assistant + tool_results），标记 `split_turn_prefix`——被分割的 turn 前半部分独立生成摘要。`split_turn` 场景的两次摘要调用**并行执行**（`futures::join!` 或 `tokio::join!`），结果合并为 `"{history_summary}\n\n---\n\n**Turn Context:**\n\n{turn_prefix_summary}"`。
 > 9. 提取文件操作列表。
 > 10. 返回 `CompactionPreparation`。
 >
@@ -135,6 +135,40 @@ pub struct FileOperation {
 **LLM 调用归属：** 独立于 Agent 主循环，由 Harness 用 `summary_model` 直接调 `LlmClient`。Agent 不感知。
 
 > **为什么 compaction 的 LLM 调用不经过 agent_loop？** (1) compaction 是同步阻塞操作——它必须完成才能继续对话；(2) 它使用不同的模型（summary_model vs 主模型）；(3) 它的 prompt 和 system prompt 是框架内置的（`SUMMARIZATION_SYSTEM_PROMPT`），与 Agent 的 system prompt 无关；(4) 它不应该触发 Agent 事件（用户不需要看到 "摘要生成中" 的流式输出）。
+
+**失败回滚语义：** `compact()` **不**写入 session——它只返回 `CompactionResult`。调用方（Harness）拿到 `Ok(result)` 后才调用 `session.append(SessionEntryPayload::Compaction(...))`。如果 `compact()` 返回 `Err`，session 完全未被修改——无需回滚。`CompactionPreparation` 只是临时分析结果，不影响持久状态。
+
+**摘要 prompt 模板（参考 TS 版本，实现阶段最终调优）：**
+
+```
+SYSTEM: You are a context summarization assistant. Your task is to read a conversation
+        between a user and an AI coding assistant, then produce a structured summary...
+
+USER:   The messages above are a conversation to summarize. Create a structured context
+        checkpoint summary that another LLM will use to continue the work.
+
+        ## Goal
+        [What is the user trying to accomplish?]
+
+        ## Progress
+        ### Done
+        - [x] [Completed tasks]
+        ### In Progress
+        - [ ] [Current work]
+
+        ## Key Decisions
+        - **[Decision]**: [Brief rationale]
+
+        ## Next Steps
+        1. [Ordered list]
+
+        ## Critical Context
+        - [File paths, function names, error messages to preserve]
+
+迭代更新模式：若存在 previous_summary，prompt 改为 UPDATE 变体——"The messages above are NEW
+conversation messages to incorporate into the existing summary provided in <previous-summary> tags."
+要求保留已有信息、添加新进展、更新 In Progress → Done。
+```
 
 **阶段交互：** v1 `harness.compact()` 仅在 Harness Idle 时可调用，期间转为 `Compacting`。v1.x 可考虑后台压缩。
 

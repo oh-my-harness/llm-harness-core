@@ -397,6 +397,8 @@ pub enum AgentEvent {
     TurnEnd     { index: u32, message: AssistantMessage, tool_results: Vec<(String, Result<ToolResult, ToolError>)> },
 
     // === 消息级（assistant message 边界） ===
+    /// message_id 由 loop 从 StreamEvent::MessageStart.id 提取。
+    /// 不携带 provider/model/api——这些字段在 MessageEnd 的完整 AssistantMessage 中。
     MessageStart  { message_id: String },
     /// 流式期间，partial assistant message 的当前快照（每次更新覆盖之前的）
     MessageUpdate { message_id: String, partial: AssistantMessage },
@@ -405,7 +407,7 @@ pub enum AgentEvent {
 
     // === Token 级（字符流） ===
     TextDelta        { message_id: String, text: String },
-    ThinkingDelta    { message_id: String, thinking: String },
+    ThinkingDelta    { message_id: String, thinking: String, signature: Option<String> },
     ToolCallStart    { message_id: String, tool_use_id: String, name: String },
     ToolCallArgsDelta { tool_use_id: String, partial_input: String },
     ToolCallEnd      { tool_use_id: String, args: serde_json::Value },
@@ -489,13 +491,19 @@ pub trait Tool: Send + Sync {
 pub enum ToolExecutionMode { Parallel, Sequential }
 
 pub struct ToolContext {
-    pub env:          Arc<dyn ExecutionEnv>,
-    pub abort:        CancellationToken,
+    pub env:               Arc<dyn ExecutionEnv>,
+    pub abort:             CancellationToken,
     /// 当前 tool call 在 LLM 返回中的 id（用于事件关联）
-    pub tool_use_id:  String,
+    pub tool_use_id:       String,
+    /// 当前轮次索引（从 0 开始）。hook 可用于 "前 N 轮不需要确认" 之类的策略。
+    pub turn_index:        u32,
+    /// 触发本次 tool call 的完整 LLM 响应。
+    /// loop 在 MessageEnd 后持有完整 AssistantMessage，构造 ToolContext 时传入。
+    /// 同一 AssistantMessage 可能触发多个 tool call，通过 Arc 共享。
+    pub assistant_message: Arc<AssistantMessage>,
     /// 长时间运行的 tool 可通过此 channel 推送部分结果。
     /// 接收端转发为 AgentEvent::ToolExecutionUpdate。
-    pub update_tx:    tokio::sync::mpsc::Sender<ToolResult>,
+    pub update_tx:         tokio::sync::mpsc::Sender<ToolResult>,
 }
 
 pub struct ToolResult {
@@ -523,12 +531,16 @@ pub struct ToolResult {
 > - `env: Arc<dyn ExecutionEnv>`——tool 通过它访问文件系统和 shell。Arc 允许 tool 在内部 clone 并用于 spawn 的 task（如果需要）。
 > - `abort: CancellationToken`——用户取消时 tool 应尽快停止。CancellationToken 可以 clone 并传递给子 task。
 > - `tool_use_id`——LLM 为每次 tool call 分配的唯一 ID。tool 用它关联事件和日志。
+> - `turn_index`——当前轮次索引。loop 在构造 `ToolContext` 时传入，`HookedTool` 将其转发给 `BeforeToolCallCtx` / `AfterToolCallCtx`。
+> - `assistant_message`——触发本次 tool call 的完整 LLM 响应。loop 在 `MessageEnd` 后构造 `ToolContext` 时传入；同一 `AssistantMessage` 可能触发多个 tool call，通过 `Arc` 共享。这是 `assistant_message` 不存储在 `HookedTool` 结构体中的原因：它不是工具的属性，而是本次调用的上下文——在 `HookedTool` 构建时（`build_loop_config()` 调用前）并不存在。
 > - `update_tx`——mpsc sender。tool 执行期间通过它推送 `ToolResult` 增量。接收端（loop）将其转发为 `AgentEvent::ToolExecutionUpdate`。Channel 容量由 loop 配置——如果 tool 推送过快，send 会阻塞，自然形成背压。
 >
 > **`ToolResult` 的三个字段：**
 > - `content: Vec<ContentBlock>`——发送给 LLM 的内容（文本、图片等）。LLM 看到的是这个。
 > - `details: serde_json::Value`——不发送给 LLM 的结构化数据，用于 UI 渲染或日志分析。如 shell tool 的 `details` 可能包含 `{ "exit_code": 0, "duration_ms": 1234 }`。
 > - `terminate: bool`——工具宣告任务完成的能力。当一个 batch 中**所有** tool 都返回 `terminate: true` 时，loop 提前停止（不等待 LLM 返回 `EndTurn`）。这是 "tool 自主停止" 机制——例如 "deploy" tool 部署成功后设置 `terminate: true`，agent 立即停止，不必再问 LLM "下一步做什么"。
+>
+> **`ToolResult.details` 持久化约定：** `details` 字段写入 session log（作为 `ToolResultMessage` 的一部分序列化为 JSON）。session 回放时不解析 `details`——它是不透明扩展数据，仅用于 UI 渲染和审计日志。compaction 不处理 `details`（不进入摘要 prompt）。
 
 ---
 
@@ -620,7 +632,7 @@ pub struct FileInfo   { pub path: PathBuf, pub is_dir: bool, pub size: u64, pub 
 
 ### 3.6 Hook traits
 
-> **本节设计目标：** 提供一系列 trait（共 13 个），允许调用方在 Agent loop 的关键决策点插入自定义逻辑。Hook 的设计原则：(1) 全部为可选——不设置 hook 时 loop 使用默认行为；(2) 全部为 `dyn Trait`——允许运行时组合；(3) 全部使用 `BoxFuture` 返回值——async 是必须支持的（hook 可能需要调外部服务）。
+> **本节设计目标：** 提供一系列 trait（本节定义 11 个；另 `ConvertToLlmHook` 和 `CustomMessageConverter` 定义在 `llm-harness-loop` 中，因其依赖 `llm-api-adapter::Message`），允许调用方在 Agent loop 的关键决策点插入自定义逻辑。Hook 的设计原则：(1) 全部为可选——不设置 hook 时 loop 使用默认行为；(2) 全部为 `dyn Trait`——允许运行时组合；(3) 全部使用 `BoxFuture` 返回值——async 是必须支持的（hook 可能需要调外部服务）。
 
 ---
 
@@ -667,6 +679,8 @@ pub trait PrepareNextTurnHook: Send + Sync {
 >
 > **为什么所有 `NextTurnDirective` 字段都是 `Option`？** `None` 表示 "沿用当前值"——hook 只需要返回想改变的字段。如果每轮都必须返回完整 directive，hook 实现者被迫维护所有状态（破坏了 "Harness 管理状态" 的设计）。
 >
+> **`tools` 与 `active_tools` 同时非 None 的优先级：** `tools` 替换全部已注册工具（`HarnessState.tools` 被整体替换），`active_tools` 仅控制激活子集。如果两者同时非 None，先应用 `tools`（替换全集），再应用 `active_tools`（在新全集中过滤）。如果 `active_tools` 引用了不在新 `tools` 中的名称，返回 `Err(AgentError::Internal)`。
+>
 > **`PrepareNextTurnCtx` 的字段选择：** 提供给 hook 的信息是 "上一轮发生了什么"——turn_index（第几轮）、last_message（LLM 最后的回复）、last_tool_results（执行的工具结果）。hook 可以据此做决定（如 "连续 3 轮没有工具调用 → 切换为 faster model"）。
 
 ---
@@ -699,22 +713,31 @@ pub struct AfterToolCallCtx<'a> {
     pub turn_index:        u32,
 }
 pub trait AfterToolCallHook: Send + Sync {
-    fn on_complete<'a>(&'a self, ctx: AfterToolCallCtx<'a>) -> BoxFuture<'a, ()>;
+    /// 返回 `Passthrough`（不改结果）或 `Patch`（部分覆盖）。
+    /// 与 TS 版对齐：可覆盖 content / details / isError / terminate。
+    fn on_complete<'a>(&'a self, ctx: AfterToolCallCtx<'a>) -> BoxFuture<'a, AfterToolCallDecision>;
+}
+
+pub enum AfterToolCallDecision {
+    Passthrough,
+    Patch(ToolResultPatch),
+}
+
+pub struct ToolResultPatch {
+    pub content:    Option<Vec<ContentBlock>>,
+    pub details:    Option<serde_json::Value>,
+    pub is_error:   Option<bool>,
+    pub terminate:  Option<bool>,
 }
 ```
 
-> **用途：** 在工具执行前后插入自定义逻辑。典型场景：
-> - `BeforeToolCallHook`：权限控制（"允许执行 rm -rf / 吗？"→Deny）、参数修正（"路径需要加 /safe 前缀"→Modify）
-> - `AfterToolCallHook`：审计日志、结果缓存、副作用追踪
+> **用途：** 在工具执行后插入自定义逻辑。典型场景：审计缓存（缓存成功的 tool 结果）、结果清理（脱敏 tool 输出）、副作用追踪。
 >
-> **`BeforeToolCallDecision` 的三种结果：**
-> - `Allow`：照常执行
-> - `Modify(Value)`：用修改后的参数执行。注意——修改的是 JSON value，hook 需要确保修改后的参数仍符合 tool 的 schema。
-> - `Deny(ToolResult)`：不执行 tool，返回 hook 提供的 ToolResult 作为替身。ToolResult 的 content 会直接发送给 LLM（作为 error tool result），LLM 可以据此调整行为。
+> **`AfterToolCallDecision` 的两种结果：**
+> - `Passthrough`：照常使用工具执行结果。
+> - `Patch(ToolResultPatch)`：部分覆盖执行结果。`ToolResultPatch` 的所有字段均为 `Option`——`None` 表示 "保持原值"。这允许 hook 只改变它关心的字段（如只修改 `is_error` 而不碰 `content`）。与 TS 版 `afterToolCall` 的行为对齐。
 >
-> **`AfterToolCallHook` 为什么返回 `()` 而非 `Result`？** After hook 是观察者——它不能改变 tool 的执行结果（如果要改变，应该在 tool 执行内部实现）。返回 `()` 简化了签名，强调 "副作用" 语义。如果 hook 内部失败，应自己处理（记日志、发告警），不应中断主流程。
->
-> **为什么 context 携带 `&AssistantMessage`？** hook 可能需要知道是哪个 LLM 回复触发了这次 tool call——例如根据 `assistant_message.model` 判断是否允许特定 tool。
+> **为什么 `after_tool_call` context 携带 `&AssistantMessage`？** hook 可能需要知道是哪个 LLM 回复触发了这次 tool call——例如根据 `assistant_message.model` 决定是否缓存结果。
 
 ---
 
@@ -787,6 +810,22 @@ pub struct AuthInfo { pub api_key: Option<String>, pub headers: Vec<(String, Str
 #### Turn 边界 Hook
 
 ```rust
+/// Harness 专属：一次完整 agent 运行（prompt 调用）开始前。
+/// 对应 TS 的 BeforeAgentStartEvent。可修改 initial_messages / system_prompt。
+pub struct BeforeRunCtx<'a> {
+    pub prompt_text:    &'a str,
+    pub initial_messages: &'a mut Vec<AgentMessage>,
+    pub system_prompt:  &'a mut Option<String>,
+    pub resources:      &'a AgentHarnessResources,
+}
+pub struct BeforeRunResult {
+    pub additional_messages: Vec<AgentMessage>,
+    pub system_prompt: Option<String>,
+}
+pub trait BeforeRunHook: Send + Sync {
+    fn before_run<'a>(&'a self, ctx: BeforeRunCtx<'a>) -> BoxFuture<'a, Result<BeforeRunResult, AgentError>>;
+}
+
 /// Harness 专属：turn 边界
 pub struct BeforeTurnCtx<'a> { pub turn_index: u32, pub snapshot: &'a TurnSnapshot }
 pub struct AfterTurnCtx<'a>  { pub turn_index: u32, pub new_messages: &'a [AgentMessage] }

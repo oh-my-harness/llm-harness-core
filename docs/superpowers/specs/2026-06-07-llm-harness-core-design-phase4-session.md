@@ -158,8 +158,17 @@ pub trait SessionStorage: Send + Sync {
     fn label_at<'a>(&'a self, id: EntryId)
         -> BoxFuture<'a, Result<Option<String>, SessionError>>;
 
-    fn find_entries_by_type<'a>(&'a self, kind: &'a str)
+    fn find_entries_by_type<'a>(&'a self, kind: SessionEntryKind)
         -> BoxFuture<'a, Result<Vec<EntryId>, SessionError>>;
+}
+
+/// SessionEntry 类型枚举——用于 `find_entries_by_type` 的类型安全参数。
+/// 实现 Display 以便日志输出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionEntryKind {
+    Message, ModelChange, ThinkingLevelChange, ActiveToolsChange,
+    Compaction, Label, SessionInfo, Custom,
+    BranchPoint, BranchSwitch, BranchSummary,
 }
 ```
 
@@ -296,6 +305,43 @@ pub struct InMemorySessionRepo { /* ... */ }
 > - `read_active_path`：返回原始 entry 列表（含所有 entry 类型：ModelChange、Compaction、BranchPoint...）。用于需要完整 session 数据的场景（compaction 准备、分支 diff、session 导出）。
 > - `build_context`：返回 "当前有效上下文"——跳过被 Compaction 覆盖的历史，应用摘要消息，提取最后已知的 model/thinking_level/tools。这是 AgentHarness 每轮重建上下文时调用的方法。
 >
+> **`build_context()` 算法（伪代码）：**
+> ```rust
+> async fn build_context(&self) -> Result<BuiltContext> {
+>     let entries = self.read_active_path().await?;  // root → leaf
+>     let mut messages = Vec::new();
+>     let mut last_model = None;
+>     let mut last_thinking = None;
+>     let mut last_tools = None;
+>     // 找到最近一次 CompactionEntry（若有）
+>     let last_compaction = entries.iter().rev()
+>         .find_map(|e| if let SessionEntryPayload::Compaction(c) = &e.payload { Some(c) } else { None });
+>     // 确定起始位置：若有 compaction，从 first_kept_entry 之后开始
+>     let start_from = last_compaction.map(|c| c.first_kept_entry);
+>     let mut skip_until_compaction = start_from.is_some();
+>     for entry in &entries {
+>         // 跳过被 compaction 覆盖的旧 entry
+>         if skip_until_compaction {
+>             if Some(entry.id) == start_from { skip_until_compaction = false; }
+>             else { continue; }
+>         }
+>         match &entry.payload {
+>             SessionEntryPayload::Message(msg) => messages.push(msg.clone()),
+>             SessionEntryPayload::Compaction(c) => {
+>                 // 将 CompactionSummaryMessage 插入到消息列表最前面
+>                 messages.insert(0, c.summary_message.clone());
+>             }
+>             SessionEntryPayload::ModelChange { to, .. } => last_model = Some(to.clone()),
+>             SessionEntryPayload::ThinkingLevelChange { to } => last_thinking = Some(*to),
+>             SessionEntryPayload::ActiveToolsChange { active } => last_tools = Some(active.clone()),
+>             // BranchSwitch / BranchPoint / Label / Custom 等——跳过，不影响消息上下文
+>             _ => {}
+>         }
+>     }
+>     Ok(BuiltContext { messages, last_model, last_thinking, last_active_tools: last_tools })
+> }
+> ```
+>
 > **`append_message` / `append`——内部自动填充：** 调用方只提供 payload，Session 自动填充 `id`（调用 `storage.create_entry_id()`）、`parent_id`（读取 `storage.active_cursor()`）、`timestamp`（`Utc::now()`），并将 `active_cursor` 更新为新 entry 的 id。这确保了 "追加→cursor 自动前进" 的语义——调用方不需要手动管理 cursor。
 >
 > **`navigate_to`——切换分支：** 将 `active_cursor` 设置为 `target`（可以是任意 entry），写入 `BranchSwitch` entry 作为审计记录。此后 `append` 会在 `target` 下创建子 entry——如果 `target` 已有其他子节点，新 entry 成为兄弟节点（新分支）。
@@ -330,7 +376,7 @@ pub struct InMemorySessionRepo { /* ... */ }
   - 首次访问时 mmap/读全量文件构建
   - 每次 `append_entry` 增量更新缓存（O(1) 插入）
   - `path_to_root` / `children` / `all_leaves` 直接走内存，O(path length) 或 O(1)
-- 大文件（>10k entries）通过 fs::Metadata::len 触发懒加载策略
+- 大文件（>10k entries 或 >100MB）：不在首次访问时构建完整内存树，改为按需从文件扫描——`path_to_root` 反向扫描，`children` 正向扫描 + 过滤。避免大 session 内存峰值，但每次查询有 I/O 开销。正常 session（<10k entries）始终全量内存缓存
 
 > **JSONL 格式的理由：** 每行一个 JSON 对象——天然支持 append（不需要重写整个文件），人类可读（调试友好），逐行解析内存友好（不需要一次加载整个文件）。相比 SQLite——更简单的依赖（不需要 `libsqlite3`），更容易跨平台（WASM），且 session 的访问模式是 "顺序重放" 而非 "随机查询"。
 >
