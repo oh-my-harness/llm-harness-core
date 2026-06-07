@@ -60,7 +60,7 @@ pub enum AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ContentBlock, StopReason, TokenUsage};
+    use crate::{ContentBlock, StopReason};
 
     fn make_assistant() -> AssistantMessage {
         AssistantMessage {
