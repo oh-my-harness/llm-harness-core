@@ -67,6 +67,27 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let the LLM loop independently. Weak criteria ("make it work") require constant clarification.
 
+### 5. 代码语言规范
+
+**仅使用英文和中文。禁止使用日文、韩文等其他语言。**
+
+代码注释、文档字符串、提交信息统一用英文或中文：
+
+- 新增代码优先用中文注释（与现有 CLAUDE.md 和项目文档保持一致）
+- 技术术语保持英文（如 `LLM`、`Hook`、`Token`）
+- 禁止用日文、韩文、其他非英中语言
+
+**审查点：** 在代码审查和提交前，检查是否有日文/韩文残留。
+
+### 6. 提交前必做清理
+
+**每次 commit 前必须：**
+
+1. 运行 `cargo fmt` — 确保代码格式统一
+2. 运行 `cargo clippy --all-targets --all-features` — 修复所有 clippy 警告（除非有充分理由保留）
+
+这两个检查是 CI 的硬要求，在本地提前发现能避免提交被拒。
+
 
 ## 项目简介
 
