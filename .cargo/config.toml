@@ -1,0 +1,12 @@
+# Cargo configuration for llm-harness-core
+
+# If GitHub network is unreliable, uncomment the section below to use local llm-api-adapter
+# This replaces the git dependency with a local path while keeping the Cargo.lock
+# commit hash reference in Cargo.toml for documentation purposes.
+#
+# [source.git-oh-my-harness]
+# git = "https://github.com/oh-my-harness/llm-api-adapter"
+# replace-with = "local-llm-api-adapter"
+#
+# [source.local-llm-api-adapter]
+# directory = "../llm-api-adapter"
