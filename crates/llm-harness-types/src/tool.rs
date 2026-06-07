@@ -84,7 +84,9 @@ mod tests {
     #[test]
     fn tool_result_defaults_terminate_false() {
         let r = ToolResult {
-            content: vec![ContentBlock::Text { text: "done".into() }],
+            content: vec![ContentBlock::Text {
+                text: "done".into(),
+            }],
             details: serde_json::Value::Null,
             terminate: false,
         };

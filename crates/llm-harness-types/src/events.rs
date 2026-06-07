@@ -29,29 +29,59 @@ pub enum AgentEvent {
     /// 一条新的 assistant message 开始流式生成。
     MessageStart { message_id: String },
     /// 流式期间 assistant message 的当前快照（覆盖之前的快照）。
-    MessageUpdate { message_id: String, partial: AssistantMessage },
+    MessageUpdate {
+        message_id: String,
+        partial: AssistantMessage,
+    },
     /// Assistant message 完整生成完毕，含 stop_reason 和 usage。
-    MessageEnd { message_id: String, message: AssistantMessage },
+    MessageEnd {
+        message_id: String,
+        message: AssistantMessage,
+    },
 
     // === Token 级（字符流） ===
     /// 文本增量。
     TextDelta { message_id: String, text: String },
     /// 推理/思考内容增量。
-    ThinkingDelta { message_id: String, thinking: String, signature: Option<String> },
+    ThinkingDelta {
+        message_id: String,
+        thinking: String,
+        signature: Option<String>,
+    },
     /// LLM 开始请求调用某个工具。
-    ToolCallStart { message_id: String, tool_use_id: String, name: String },
+    ToolCallStart {
+        message_id: String,
+        tool_use_id: String,
+        name: String,
+    },
     /// LLM 工具调用参数的增量 JSON 片段。
-    ToolCallArgsDelta { tool_use_id: String, partial_input: String },
+    ToolCallArgsDelta {
+        tool_use_id: String,
+        partial_input: String,
+    },
     /// LLM 工具调用参数完整到达，含解析后的完整参数。
-    ToolCallEnd { tool_use_id: String, args: serde_json::Value },
+    ToolCallEnd {
+        tool_use_id: String,
+        args: serde_json::Value,
+    },
 
     // === 工具执行（Rust 层面执行 tool，区别于 LLM 发起的 ToolCall） ===
     /// Tool 开始执行。
-    ToolExecutionStart { tool_use_id: String, tool_name: String, args: serde_json::Value },
+    ToolExecutionStart {
+        tool_use_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+    },
     /// 长时间运行的 tool 推送的中间结果。
-    ToolExecutionUpdate { tool_use_id: String, partial: ToolResult },
+    ToolExecutionUpdate {
+        tool_use_id: String,
+        partial: ToolResult,
+    },
     /// Tool 执行完毕；携带 Rust 层面的执行结果。
-    ToolExecutionEnd { tool_use_id: String, result: Result<ToolResult, ToolError> },
+    ToolExecutionEnd {
+        tool_use_id: String,
+        result: Result<ToolResult, ToolError>,
+    },
 
     /// Loop 遇到不可恢复的错误；之后 `AgentEnd` 将立即到达。
     Error(AgentError),
@@ -77,13 +107,17 @@ mod tests {
 
     #[test]
     fn agent_start_event_has_messages() {
-        let ev = AgentEvent::AgentStart { initial_messages: vec![] };
+        let ev = AgentEvent::AgentStart {
+            initial_messages: vec![],
+        };
         assert!(matches!(ev, AgentEvent::AgentStart { .. }));
     }
 
     #[test]
     fn agent_end_event_carries_new_messages() {
-        let ev = AgentEvent::AgentEnd { new_messages: vec![] };
+        let ev = AgentEvent::AgentEnd {
+            new_messages: vec![],
+        };
         assert!(matches!(ev, AgentEvent::AgentEnd { .. }));
     }
 

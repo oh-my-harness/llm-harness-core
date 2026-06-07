@@ -132,10 +132,7 @@ pub trait ExecutionEnv: Send + Sync {
     ) -> BoxFuture<'a, Result<(), EnvError>>;
 
     /// 创建临时目录；返回其绝对路径。
-    fn create_temp_dir<'a>(
-        &'a self,
-        prefix: &'a str,
-    ) -> BoxFuture<'a, Result<PathBuf, EnvError>>;
+    fn create_temp_dir<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<PathBuf, EnvError>>;
 
     /// 执行 shell 命令。
     fn execute_shell<'a>(

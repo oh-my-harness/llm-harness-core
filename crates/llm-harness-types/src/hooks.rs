@@ -83,10 +83,7 @@ pub enum BeforeToolCallDecision {
 /// 工具执行前的拦截 hook。
 pub trait BeforeToolCallHook: Send + Sync {
     /// 在工具执行前决定是否允许、修改参数或拒绝执行。
-    fn on_call<'a>(
-        &'a self,
-        ctx: BeforeToolCallCtx<'a>,
-    ) -> BoxFuture<'a, BeforeToolCallDecision>;
+    fn on_call<'a>(&'a self, ctx: BeforeToolCallCtx<'a>) -> BoxFuture<'a, BeforeToolCallDecision>;
 }
 
 // ── AfterToolCallHook ─────────────────────────────────────────────────────────
@@ -130,10 +127,8 @@ pub enum AfterToolCallDecision {
 /// 工具执行后的结果拦截 hook。
 pub trait AfterToolCallHook: Send + Sync {
     /// 在工具执行完成后决定是否覆盖结果。
-    fn on_complete<'a>(
-        &'a self,
-        ctx: AfterToolCallCtx<'a>,
-    ) -> BoxFuture<'a, AfterToolCallDecision>;
+    fn on_complete<'a>(&'a self, ctx: AfterToolCallCtx<'a>)
+    -> BoxFuture<'a, AfterToolCallDecision>;
 }
 
 // ── ShouldStopHook ────────────────────────────────────────────────────────────

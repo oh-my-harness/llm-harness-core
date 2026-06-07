@@ -51,7 +51,9 @@ mod tests {
 
     #[test]
     fn content_block_serde_text() {
-        let cb = ContentBlock::Text { text: "hello".into() };
+        let cb = ContentBlock::Text {
+            text: "hello".into(),
+        };
         let json = serde_json::to_string(&cb).unwrap();
         let cb2: ContentBlock = serde_json::from_str(&json).unwrap();
         assert!(matches!(cb2, ContentBlock::Text { text } if text == "hello"));
@@ -77,8 +79,6 @@ mod tests {
         };
         let json = serde_json::to_string(&cb).unwrap();
         let cb2: ContentBlock = serde_json::from_str(&json).unwrap();
-        assert!(
-            matches!(cb2, ContentBlock::Thinking { signature: Some(s), .. } if s == "sig123")
-        );
+        assert!(matches!(cb2, ContentBlock::Thinking { signature: Some(s), .. } if s == "sig123"));
     }
 }
