@@ -61,8 +61,8 @@ pub struct LoopConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::convert::DefaultConvertToLlm;
+    
+    
 
     #[test]
     #[cfg(feature = "test-utils")]

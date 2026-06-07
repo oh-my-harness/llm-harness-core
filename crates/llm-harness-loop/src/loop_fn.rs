@@ -347,12 +347,12 @@ fn run_loop(
 #[cfg(test)]
 #[cfg(feature = "test-utils")]
 mod tests {
-    use super::*;
     use crate::{
-        convert::DefaultConvertToLlm,
         test_utils::{MockLlmClient, MockResponse, NoOpEnv},
     };
     use futures::future::BoxFuture;
+    use llm_harness_types::*;
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
     fn make_config(responses: Vec<MockResponse>) -> (Arc<MockLlmClient>, LoopConfig) {
