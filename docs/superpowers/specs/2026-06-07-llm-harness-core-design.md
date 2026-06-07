@@ -1,7 +1,7 @@
 # llm-harness-core 系统设计
 
 **日期：** 2026-06-07
-**状态：** 已批准（v3，已纳入对齐审核 gap-analysis）
+**状态：** 已批准（v4，纳入多分支完整实现）
 
 ## 1. 背景与目标
 
@@ -595,14 +595,22 @@ pub async fn wait_for_idle(&self);
 
 详见 §3.7 `TurnSnapshot`。每次 turn 开始 clone 一份，期间 model/tools 修改进入下一轮。
 
-### 5.3 Session（树形前向兼容的追加日志）
+### 5.3 Session（多分支树）
 
-**设计哲学：** 会话是类型化追加日志，每条 entry 含 `parent_id` 前向兼容树结构。v1 仅创建单一线性链（每条 entry 的 parent = 上一条 entry），但所有接口为分支扩展做好准备。
+**设计哲学：** 会话是类型化追加日志，每条 entry 含 `parent_id` 形成**真正的树**。多个 leaf 表示并存的分支；用户可在任意历史 entry 上 fork 出新分支；`navigate_tree(target)` 切换活跃 leaf。
+
+**核心概念：**
+- **Entry tree**：所有 entry 按 `parent_id` 链接成树（root 的 parent = None）
+- **Leaf**：任何一个没有子 entry 的节点；每条分支对应一个 leaf
+- **Active leaf** (`leaf_id`)：当前写入指向的 leaf，新 entry 的 `parent_id = leaf_id`
+- **Branch**：从 root 到任一 leaf 的路径
+- **Fork**：在一条已有路径的中间 entry 上追加新 entry，创造新分支
+- **Cross-session fork**：把整条路径复制到新 session 作为独立时间线
 
 ```rust
 pub struct SessionEntry {
     pub id:         EntryId,
-    pub parent_id:  Option<EntryId>,    // None = root；v1 始终指向链上一项
+    pub parent_id:  Option<EntryId>,    // None = root
     pub timestamp:  chrono::DateTime<chrono::Utc>,
     pub payload:    SessionEntryPayload,
 }
@@ -615,18 +623,32 @@ pub enum SessionEntryPayload {
     Compaction(CompactionEntry),
     Label               { name: String },
     SessionInfo         { name: String },             // 会话命名（UI 显示）
-    Custom              { r#type: String, data: serde_json::Value }, // 应用层结构化数据
-    // 未来分支扩展点（v1 不创建）：
-    // BranchPoint  { from: EntryId },
-    // BranchSwitch { to:   EntryId },
+    Custom              { r#type: String, data: serde_json::Value },
+
+    /// 分支点标记：明示此 entry 之后产生了新分支（导航 UI 用）
+    /// 不强制——任何 entry 都可以成为分支起点；本 entry 仅做语义标注
+    BranchPoint  { from: EntryId, label: Option<String> },
+
+    /// 分支切换记录：从 from leaf 切换到 to leaf（写入新分支的第一条 entry）
+    BranchSwitch { from: EntryId, to: EntryId, summary: Option<String> },
+
+    /// 分支摘要：AI 生成的某个分支的概要，导航时辅助理解上下文
+    BranchSummary(BranchSummaryEntry),
 }
 
 pub struct CompactionEntry {
     pub summary_message:   AgentMessage,        // CompactionSummaryMessage
-    pub first_kept_entry:  EntryId,             // 标记"从此 entry 起的历史仍有效"——下一次 compaction 边界
+    pub first_kept_entry:  EntryId,             // "从此 entry 起的历史仍有效"——下一次 compaction 边界
     pub tokens_before:     usize,
-    pub from_hook:         bool,                // 是否由 BeforeCompactHook 提供
-    pub details:           Option<serde_json::Value>, // 文件操作等附加数据
+    pub from_hook:         bool,
+    pub details:           Option<serde_json::Value>,
+}
+
+pub struct BranchSummaryEntry {
+    pub leaf_id:        EntryId,                // 被摘要的分支的 leaf
+    pub from_entry:     EntryId,                // 摘要起始 entry（含）
+    pub summary:        String,
+    pub token_count:    usize,
 }
 ```
 
@@ -639,61 +661,132 @@ pub struct SessionMetadata {
     pub created_at:   chrono::DateTime<chrono::Utc>,
     pub updated_at:   chrono::DateTime<chrono::Utc>,
     pub model:        Option<String>,
-    pub leaf_id:      Option<EntryId>,
+    pub active_leaf:  Option<EntryId>,   // 当前活跃 leaf
 }
 
-/// 底层存储 trait：负责字节追加、按 id 查找、leaf 追踪。
+/// 底层存储 trait：负责字节追加 + 树查询 + 活跃 leaf 追踪。
 pub trait SessionStorage: Send + Sync {
     fn metadata<'a>(&'a self) -> BoxFuture<'a, Result<SessionMetadata, SessionError>>;
+
     fn create_entry_id(&self) -> EntryId;  // UUIDv7
+
     fn append_entry<'a>(&'a self, entry: SessionEntry)
         -> BoxFuture<'a, Result<(), SessionError>>;
+
     fn get_entry<'a>(&'a self, id: EntryId)
         -> BoxFuture<'a, Result<Option<SessionEntry>, SessionError>>;
-    fn leaf_id<'a>(&'a self) -> BoxFuture<'a, Result<Option<EntryId>, SessionError>>;
-    fn set_leaf_id<'a>(&'a self, id: EntryId)
-        -> BoxFuture<'a, Result<(), SessionError>>;
-    /// 从 leaf 回溯到 root 的路径（按时间顺序返回，root 在前）
-    fn path_to_root<'a>(&'a self, leaf_id: EntryId)
+
+    /// 列出某 entry 的所有直接子 entry（用于树形 UI）
+    fn children<'a>(&'a self, parent: EntryId)
         -> BoxFuture<'a, Result<Vec<SessionEntry>, SessionError>>;
+
+    /// 列出当前所有 leaf（无子节点的 entry）
+    fn all_leaves<'a>(&'a self)
+        -> BoxFuture<'a, Result<Vec<EntryId>, SessionError>>;
+
+    /// 活跃 leaf：当前写入指向
+    fn active_leaf<'a>(&'a self)
+        -> BoxFuture<'a, Result<Option<EntryId>, SessionError>>;
+
+    fn set_active_leaf<'a>(&'a self, id: EntryId)
+        -> BoxFuture<'a, Result<(), SessionError>>;
+
+    /// 从指定 entry 回溯到 root 的路径（root 在前）
+    fn path_to_root<'a>(&'a self, target: EntryId)
+        -> BoxFuture<'a, Result<Vec<SessionEntry>, SessionError>>;
+
+    /// 查找两个 entry 的最近公共祖先（分支 diff/合并辅助）
+    fn common_ancestor<'a>(&'a self, a: EntryId, b: EntryId)
+        -> BoxFuture<'a, Result<Option<EntryId>, SessionError>>;
+
+    fn label_at<'a>(&'a self, id: EntryId)
+        -> BoxFuture<'a, Result<Option<String>, SessionError>>;
+
+    fn find_entries_by_type<'a>(&'a self, kind: &'a str)
+        -> BoxFuture<'a, Result<Vec<EntryId>, SessionError>>;
 }
 
-/// 仓库抽象——管理多个 session 的生命周期
+/// 仓库抽象——管理多个 session 的生命周期与跨 session fork。
 pub trait SessionRepo: Send + Sync {
     fn create<'a>(&'a self, opts: CreateSessionOptions)
         -> BoxFuture<'a, Result<Arc<dyn SessionStorage>, SessionError>>;
+
     fn open<'a>(&'a self, id: &'a str)
         -> BoxFuture<'a, Result<Arc<dyn SessionStorage>, SessionError>>;
+
     fn list<'a>(&'a self, opts: ListSessionOptions)
         -> BoxFuture<'a, Result<Vec<SessionMetadata>, SessionError>>;
+
     fn delete<'a>(&'a self, id: &'a str)
         -> BoxFuture<'a, Result<(), SessionError>>;
-    /// v1 不实现，但接口保留——分支 fork
-    fn fork<'a>(&'a self, source_id: &'a str, from_entry: EntryId)
+
+    /// 跨 session fork：把 source 中从 root 到 from_entry 的整条路径
+    /// 作为新 session 的初始内容，新 session 拥有独立 id 与生命周期。
+    /// entry id 全部重新分配；新 session 的 active_leaf = 复制路径的尾部
+    fn fork<'a>(&'a self, source_id: &'a str, from_entry: EntryId, opts: ForkOptions)
         -> BoxFuture<'a, Result<Arc<dyn SessionStorage>, SessionError>>;
 }
 
-/// 高层 Session 接口：解释 Compaction，构建"当前有效上下文"。
+pub struct ForkOptions {
+    pub name:        Option<String>,
+    /// 是否复制 entry 内容；false 则仅复制 path 元数据并打 BranchPoint 引用 source
+    pub copy_entries: bool,
+}
+
+/// 高层 Session 接口：解释 Compaction，构建活跃分支的"当前有效上下文"。
 pub struct Session { storage: Arc<dyn SessionStorage> }
 
 impl Session {
-    /// 原始路径：从 leaf 回溯到 root 的所有 entry
-    pub async fn read_path(&self) -> Result<Vec<SessionEntry>, SessionError>;
+    /// 当前活跃 leaf 的原始路径（含所有 entry 类型）
+    pub async fn read_active_path(&self) -> Result<Vec<SessionEntry>, SessionError>;
 
-    /// 有效上下文：跳过被 Compaction 覆盖的历史，应用 Compaction 摘要，仅返回 messages
+    /// 任意 leaf 的原始路径
+    pub async fn read_path_of(&self, leaf: EntryId)
+        -> Result<Vec<SessionEntry>, SessionError>;
+
+    /// 活跃分支的"有效 messages"：跳过被 Compaction 覆盖的历史，应用摘要
     pub async fn build_context(&self) -> Result<Vec<AgentMessage>, SessionError>;
 
+    /// 在活跃 leaf 下追加（最常用）
     pub async fn append_message(&self, msg: AgentMessage) -> Result<EntryId, SessionError>;
     pub async fn append(&self, payload: SessionEntryPayload) -> Result<EntryId, SessionError>;
+
+    // === 分支操作 ===
+
+    /// 切换活跃 leaf。target 必须是一个 leaf（无子节点）。
+    /// 写入一条 BranchSwitch entry 作为切换记录。
+    pub async fn navigate_to(&self, target: EntryId) -> Result<(), SessionError>;
+
+    /// 在历史 entry 上 fork 新分支：将 from_entry 作为新分支的起点，
+    /// 之后写入会在 from_entry 下创建子 entry，自然成为新 leaf。
+    /// 写入 BranchPoint 标记并切换 active_leaf 到新分支起点。
+    pub async fn fork_branch(&self, from_entry: EntryId, label: Option<String>)
+        -> Result<EntryId, SessionError>;
+
+    /// 列出所有分支（leaf → 该分支的简要描述）
+    pub async fn list_branches(&self) -> Result<Vec<BranchInfo>, SessionError>;
+
+    /// 删除一个分支：从指定 leaf 开始向上删除，直到遇到有其他子节点的 entry
+    pub async fn delete_branch(&self, leaf: EntryId) -> Result<(), SessionError>;
+}
+
+pub struct BranchInfo {
+    pub leaf_id:       EntryId,
+    pub label:         Option<String>,
+    pub message_count: usize,
+    pub last_activity: chrono::DateTime<chrono::Utc>,
+    pub summary:       Option<String>,   // 来自最近的 BranchSummary entry
 }
 
 pub struct JsonlSessionRepo  { root_dir: PathBuf }
 pub struct InMemorySessionRepo { /* ... */ }
 ```
 
-**v1 范围说明：** 分支创建 / 切换 / fork 实现推迟到 v1.x。Session 的所有接口已为分支做好准备（parent_id、leaf_id、path_to_root），届时只需实现 `BranchPoint` / `BranchSwitch` entry 和 `SessionRepo::fork`。
+**JSONL 存储策略：** 单 session 单文件，所有 entry 按时间顺序 append。文件本身是线性日志，树结构由 `parent_id` 在读取时重建。`active_leaf` 持久化到 session metadata（独立的 `.meta.json`）。
 
-**超大 entry 处理：** v1 不引入外部存储引用。调用方在 tool 实现中预先截断（参考 pi-agent-core `truncateOutput`）。
+**分支摘要生成：** `generate_branch_summary(client, session, leaf)` 在 Harness 层提供，调用 `summary_model` 生成 BranchSummary entry。导航到该分支时 UI 可显示摘要。
+
+**Compaction 与分支的交互：** 每个分支独立追踪 compaction 历史——`first_kept_entry` 沿 parent_id 链向上追溯，找到本分支最近一次 Compaction entry 作为基准。fork 出的新分支继承父分支的 compaction 历史；fork 后新写入的 entry 形成本分支的新 compaction 边界。
 
 ### 5.4 Compaction（基于 session entries）
 
@@ -846,7 +939,7 @@ pub struct HarnessState {
 }
 
 #[derive(PartialEq, Clone, Copy)]
-pub enum HarnessPhase { Idle, Turning, Compacting }
+pub enum HarnessPhase { Idle, Turning, Compacting, Branching }
 
 pub struct HarnessHooks {
     pub convert_to_llm:           Arc<dyn ConvertToLlmHook>,
@@ -879,6 +972,10 @@ pub enum AgentHarnessEvent {
     CompactionEnd     { stats: Option<CompactionStats>, error: Option<String> },
     QueueUpdate       { steer_len: usize, follow_up_len: usize },
     SavePoint         { entries_flushed: usize },
+    BranchForked      { from: EntryId, new_leaf: EntryId, label: Option<String> },
+    BranchSwitched    { from: EntryId, to: EntryId },
+    BranchDeleted     { leaf: EntryId },
+    BranchSummarized  { leaf: EntryId, summary: String },
     Aborted,
     Settled,
 }
@@ -913,6 +1010,20 @@ pub async fn set_session_name(&self, name: String) -> Result<(), HarnessError>;
 pub async fn append_message(&self, msg: AgentMessage) -> Result<EntryId, HarnessError>;
 pub async fn append_custom_entry(&self, r#type: String, data: serde_json::Value)
     -> Result<EntryId, HarnessError>;
+
+// === 分支操作（仅 Idle）===
+/// 在活跃 leaf 当前历史的某 entry 上 fork 新分支并切换为活跃 leaf
+pub async fn fork_branch(&self, from_entry: EntryId, label: Option<String>)
+    -> Result<EntryId, HarnessError>;
+/// 切换活跃 leaf 到指定 entry（目标必须是 leaf）
+pub async fn navigate_tree(&self, target: EntryId) -> Result<(), HarnessError>;
+/// 列出所有分支
+pub async fn list_branches(&self) -> Result<Vec<BranchInfo>, HarnessError>;
+/// 删除分支
+pub async fn delete_branch(&self, leaf: EntryId) -> Result<(), HarnessError>;
+/// 为指定 leaf 生成 AI 摘要（用 summary_model 调用 LLM），写入 BranchSummary entry
+pub async fn generate_branch_summary(&self, leaf: EntryId)
+    -> Result<BranchSummaryEntry, HarnessError>;
 
 // === 队列：任何阶段均安全 ===
 pub fn steer(&self, text: impl Into<String>);
@@ -950,9 +1061,10 @@ pub async fn wait_for_settled(&self);  // 所有 pending session writes 落盘
 | 执行环境 | 完整 trait（~13 方法）+ ShellOptions | 对齐 TS 的 FileSystem/Shell；路径操作走 std::path |
 | 锁策略 | `std::sync::Mutex` + 快照模式 | 性能 + 跨 await 安全 |
 | 阶段锁 | 运行时枚举 | typestate 不适合 async + 长生命周期 |
-| Session 结构 | 树形前向兼容（含 parent_id / leaf_id / path_to_root） | v1 单链，分支扩展非破坏性 |
-| Session 仓库 | `SessionRepo` trait（create/open/list/delete/fork） | 多 session 管理 |
-| Session 读取 | `read_path` 原始 + `build_context` 解释 Compaction | 双层职责 |
+| Session 结构 | 真正的多分支树（parent_id + active_leaf + all_leaves） | v1 即支持 fork/navigate/list/delete 分支 |
+| Session 仓库 | `SessionRepo` trait（create/open/list/delete/fork） | 多 session 管理；fork 跨 session 复制路径 |
+| Session 读取 | `read_active_path` 原始 + `build_context` 解释 Compaction + `read_path_of(leaf)` 任意分支 | 双层职责 + 多分支支持 |
+| 分支摘要 | `generate_branch_summary` 用 summary_model 生成；写入 BranchSummary entry | 导航 UI 显示分支概要 |
 | Compaction | 基于 session entries；prepare/execute 两段；输出 first_kept_entry | 边界正确性 + 迭代摘要 |
 | convert_to_llm | LoopConfig 必需 hook | CustomMessage 不能直送 LLM |
 | prepare_next_turn | LoopConfig 可选 hook | Harness 从 session 重建上下文 |
@@ -970,10 +1082,10 @@ pub async fn wait_for_settled(&self);  // 所有 pending session writes 落盘
 
 - **Proxy 模式**（browser → backend 流式转发）：可后续作为独立 feature
 - **WASM 目标**：`ExecutionEnv` trait 已抽象；WASM 实现留待后期
-- **Session 分支创建/切换/fork**：v1 接口已就绪，实现推迟到 v1.x
 - **后台 compaction**：v1 同步触发；v1.x 可考虑异步
 - **细粒度权限模型**（capability token）：v1 由 ExecutionEnv 实现方控制
 - **超大 entry 外部存储**：v1 调用方截断
 - **`prepareArguments` 的 typed schema 泛型**：v1 用 `serde_json::Value`，未来可引入 typed 泛型 Tool
 - **Agent loop 以外的框架能力**（规划、记忆管理）：调用方责任
 - **典型应用层组件**（如内置 bash tool / file edit tool）：作为示例代码或独立 crate 提供
+- **分支可视化 UI**：框架提供数据接口（`list_branches`、tree 查询），UI 由调用方实现
