@@ -1,7 +1,7 @@
 # llm-harness-core 系统设计
 
 **日期：** 2026-06-07
-**状态：** 已批准（v4，纳入多分支完整实现）
+**状态：** 已批准（v5，纳入自洽性审核修订）
 
 ## 1. 背景与目标
 
@@ -80,6 +80,63 @@ pub enum AgentError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason { EndTurn, MaxTokens, StopSequence, ToolUse, Other }
+
+/// 执行环境错误——对应 TS 的 8 种 FileSystem/Shell 错误码
+#[derive(thiserror::Error, Debug)]
+pub enum EnvError {
+    #[error("path not found: {0}")]                    NotFound(PathBuf),
+    #[error("permission denied: {0}")]                 PermissionDenied(PathBuf),
+    #[error("path already exists: {0}")]               AlreadyExists(PathBuf),
+    #[error("not a directory: {0}")]                   NotADirectory(PathBuf),
+    #[error("is a directory: {0}")]                    IsADirectory(PathBuf),
+    #[error("operation aborted")]                      Aborted,
+    #[error("invalid utf-8 in {0}")]                   InvalidUtf8(PathBuf),
+    #[error("shell command failed: exit {exit_code}")] ShellFailed { exit_code: i32, stderr: String },
+    #[error("io error: {0}")]                          Io(#[from] std::io::Error),
+    #[error("other: {0}")]                             Other(String),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum SessionError {
+    #[error("entry not found: {0}")]               EntryNotFound(EntryId),
+    #[error("session not found: {0}")]             SessionNotFound(String),
+    #[error("session already exists: {0}")]        SessionAlreadyExists(String),
+    #[error("not a leaf: {0}")]                    NotALeaf(EntryId),
+    #[error("invalid parent: {0}")]                InvalidParent(EntryId),
+    #[error("storage io: {0}")]                    Io(#[from] std::io::Error),
+    #[error("serialization: {0}")]                 Serialization(String),
+    #[error("concurrent modification")]            ConcurrentModification,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum CompactionError {
+    #[error("not enough tokens to compact")]      InsufficientTokens,
+    #[error("summary model call failed: {0}")]    SummaryFailed(String),
+    #[error(transparent)]                          Session(#[from] SessionError),
+    #[error(transparent)]                          Agent(#[from] AgentError),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum TemplateError {
+    #[error("template not found: {0}")]                    NotFound(String),
+    #[error("missing required argument at position {0}")]  MissingArg(usize),
+    #[error("invalid argument syntax: {0}")]               InvalidSyntax(String),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum HarnessError {
+    #[error("harness is not idle (current phase: {0:?})")] NotIdle(crate::HarnessPhase),
+    #[error("skill not found: {0}")]                        SkillNotFound(String),
+    #[error("template not found: {0}")]                     TemplateNotFound(String),
+    #[error(transparent)]                                   Agent(#[from] AgentError),
+    #[error(transparent)]                                   Session(#[from] SessionError),
+    #[error(transparent)]                                   Compaction(#[from] CompactionError),
+    #[error(transparent)]                                   Env(#[from] EnvError),
+    #[error(transparent)]                                   Template(#[from] TemplateError),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DiagnosticLevel { Warn, Error }
 ```
 
 ### 3.2 ContentBlock 与消息类型
@@ -302,24 +359,16 @@ pub struct FileInfo   { pub path: PathBuf, pub is_dir: bool, pub size: u64, pub 
 
 ### 3.6 Hook traits
 
-```rust
-/// AgentMessage → llm-api-adapter Message 的转换。必需 hook（CustomMessage 不能直接送 LLM）。
-/// 默认实现处理 User/Assistant/ToolResult/BranchSummary/CompactionSummary；
-/// CustomMessage 必须由调用方覆盖处理。
-pub trait ConvertToLlmHook: Send + Sync {
-    fn convert<'a>(
-        &'a self,
-        messages: &'a [AgentMessage],
-    ) -> BoxFuture<'a, Result<Vec<llm_api_adapter::Message>, AgentError>>;
-}
+> **架构原则：** `ConvertToLlmHook` 涉及外部 crate `llm-api-adapter::Message`，违反 types 的零 IO 约束，**定义在 `llm-harness-loop` 中**（详见 §4.1）。其他 hook 因不依赖外部类型，保留在 types 中。
 
+```rust
 /// 每次 LLM 调用前对上下文做转换（compaction 通过此 hook 接入）。
 pub trait TransformContextHook: Send + Sync {
     fn transform<'a>(&'a self, ctx: AgentContext)
         -> BoxFuture<'a, Result<AgentContext, AgentError>>;
 }
 
-/// 每个 turn 结束后调用，可返回新的 context / model / thinking_level。
+/// 每个 turn 结束后调用，可返回新的 context / model / thinking_level / tools。
 /// AgentHarness 用它每轮从 session log 重建上下文。
 pub struct PrepareNextTurnCtx<'a> {
     pub turn_index:        u32,
@@ -327,38 +376,67 @@ pub struct PrepareNextTurnCtx<'a> {
     pub last_tool_results: &'a [(String, Result<ToolResult, ToolError>)],
 }
 pub struct NextTurnDirective {
-    pub context:        Option<AgentContext>,         // None = 沿用当前
+    pub context:        Option<AgentContext>,
     pub model:          Option<String>,
     pub thinking_level: Option<ThinkingLevel>,
+    pub tools:          Option<Vec<Arc<dyn Tool>>>,            // 替换全部工具
+    pub active_tools:   Option<HashSet<String>>,               // 仅控制激活子集
 }
 pub trait PrepareNextTurnHook: Send + Sync {
     fn prepare<'a>(&'a self, ctx: PrepareNextTurnCtx<'a>)
         -> BoxFuture<'a, Result<NextTurnDirective, AgentError>>;
 }
 
-pub struct BeforeToolCallCtx<'a> { /* ... assistant_message, tool_use_id, tool_name, args ... */ }
-pub enum BeforeToolCallDecision { Allow, Modify(serde_json::Value), Deny(ToolResult) }
+pub struct BeforeToolCallCtx<'a> {
+    pub assistant_message: &'a AssistantMessage,
+    pub tool_use_id:       &'a str,
+    pub tool_name:         &'a str,
+    pub args:              &'a serde_json::Value,
+    pub turn_index:        u32,
+}
+pub enum BeforeToolCallDecision {
+    Allow,
+    Modify(serde_json::Value),
+    Deny(ToolResult),
+}
 pub trait BeforeToolCallHook: Send + Sync {
     fn on_call<'a>(&'a self, ctx: BeforeToolCallCtx<'a>) -> BoxFuture<'a, BeforeToolCallDecision>;
 }
 
-pub struct AfterToolCallCtx<'a> { /* ... assistant_message, tool_use_id, tool_name, args, result ... */ }
+pub struct AfterToolCallCtx<'a> {
+    pub assistant_message: &'a AssistantMessage,
+    pub tool_use_id:       &'a str,
+    pub tool_name:         &'a str,
+    pub args:              &'a serde_json::Value,
+    pub result:            &'a Result<ToolResult, ToolError>,
+    pub turn_index:        u32,
+}
 pub trait AfterToolCallHook: Send + Sync {
     fn on_complete<'a>(&'a self, ctx: AfterToolCallCtx<'a>) -> BoxFuture<'a, ()>;
 }
 
-pub struct ShouldStopCtx<'a> { /* last_assistant, stop_reason, turn_index ... */ }
+pub struct ShouldStopCtx<'a> {
+    pub last_assistant: &'a AssistantMessage,
+    pub stop_reason:    StopReason,
+    pub turn_index:     u32,
+}
 pub trait ShouldStopHook: Send + Sync {
     /// 仅在 LLM 自然停止时调用。返回 true 才停止；返回 false 强制再跑一轮。
     /// 不能用于强制中断进行中的 turn——中断走 abort()。
     fn should_stop<'a>(&'a self, ctx: ShouldStopCtx<'a>) -> BoxFuture<'a, bool>;
 }
 
-/// Provider 请求拦截：可改 stream options（timeout、retry、headers、metadata、cache）
+/// Provider 请求拦截：可改 stream options
 pub trait BeforeProviderRequestHook: Send + Sync {
     fn before_request<'a>(&'a self, opts: &'a mut StreamOptions) -> BoxFuture<'a, ()>;
 }
-/// Provider 响应观察：检视 headers/status，用于配额追踪
+
+pub struct ProviderResponseInfo {
+    pub status_code:      Option<u16>,
+    pub response_headers: Vec<(String, String)>,
+    pub usage:            Option<TokenUsage>,
+    pub latency_ms:       u64,
+}
 pub trait AfterProviderResponseHook: Send + Sync {
     fn after_response<'a>(&'a self, info: &'a ProviderResponseInfo) -> BoxFuture<'a, ()>;
 }
@@ -393,6 +471,9 @@ pub struct AgentContext {
     pub messages:      Vec<AgentMessage>,
 }
 
+/// Turn 快照：types 层的纯值结构。Agent / AgentHarness 在 turn 开始时
+/// 用各自的 *State 直接构造（在持锁块内 clone 字段），不需 From impl。
+/// 所有字段 pub 允许 workspace 内任意 crate 直接构造。
 #[derive(Clone)]
 pub struct TurnSnapshot {
     pub model:          String,
@@ -418,7 +499,41 @@ pub struct StreamOptions {
 
 **依赖：** `llm-harness-types`, `llm-api-adapter`, `tokio`, `tokio-stream`, `futures`
 
-### 4.1 API
+### 4.1 `ConvertToLlmHook`（定义在此 crate，因依赖 `llm-api-adapter`）
+
+```rust
+/// AgentMessage → llm-api-adapter::Message 的转换。LoopConfig 必需。
+pub trait ConvertToLlmHook: Send + Sync {
+    fn convert<'a>(
+        &'a self,
+        messages: &'a [AgentMessage],
+    ) -> BoxFuture<'a, Result<Vec<llm_api_adapter::Message>, AgentError>>;
+}
+
+/// 框架提供的默认转换器：
+/// - User / Assistant / ToolResult → 直接映射
+/// - BranchSummary / CompactionSummary → 带前缀的 system-like UserMessage
+/// - Custom → 返回 Err（强制调用方覆盖；或用 `with_custom_converter` 注入处理）
+pub struct DefaultConvertToLlm {
+    pub custom_handler: Option<Arc<dyn CustomMessageConverter>>,
+}
+
+pub trait CustomMessageConverter: Send + Sync {
+    fn convert<'a>(&'a self, msg: &'a CustomMessage)
+        -> BoxFuture<'a, Result<llm_api_adapter::Message, AgentError>>;
+}
+
+impl DefaultConvertToLlm {
+    pub fn new() -> Self { Self { custom_handler: None } }
+    pub fn with_custom_converter(mut self, c: Arc<dyn CustomMessageConverter>) -> Self {
+        self.custom_handler = Some(c); self
+    }
+}
+
+impl ConvertToLlmHook for DefaultConvertToLlm { /* ... */ }
+```
+
+### 4.2 LoopConfig 与 API
 
 ```rust
 pub struct LoopConfig {
@@ -426,28 +541,20 @@ pub struct LoopConfig {
     pub default_execution_mode: ToolExecutionMode,
     pub stream_options:         StreamOptions,
 
-    /// AgentMessage → llm-api-adapter Message 的转换（必需，loop 不会假设默认）
+    /// 必需
     pub convert_to_llm:         Arc<dyn ConvertToLlmHook>,
 
-    /// 每次 LLM 调用前转换上下文（compaction 通过此 hook 接入）
+    /// 可选 hooks
     pub transform_context:      Option<Arc<dyn TransformContextHook>>,
-
-    /// 每个 turn 后返回新 context/model/thinking_level（Harness 用此从 session 重建上下文）
     pub prepare_next_turn:      Option<Arc<dyn PrepareNextTurnHook>>,
-
-    /// LLM 自然停止时决定是否继续
     pub should_stop:            Option<Arc<dyn ShouldStopHook>>,
-
-    /// Provider 请求/响应拦截
     pub before_provider_request: Option<Arc<dyn BeforeProviderRequestHook>>,
     pub after_provider_response: Option<Arc<dyn AfterProviderResponseHook>>,
-
-    /// 动态认证
     pub auth:                   Option<Arc<dyn AuthHook>>,
 
-    /// 响应式注入 channels
-    pub steer_rx:               Option<tokio::sync::mpsc::Receiver<String>>,
-    pub follow_up_rx:           Option<tokio::sync::mpsc::Receiver<String>>,
+    /// 响应式注入 channels——载荷为完整 AgentMessage 以支持多模态
+    pub steer_rx:               Option<tokio::sync::mpsc::Receiver<AgentMessage>>,
+    pub follow_up_rx:           Option<tokio::sync::mpsc::Receiver<AgentMessage>>,
 }
 
 /// 从初始上下文开始执行
@@ -465,7 +572,57 @@ pub fn agent_loop_continue(
 ) -> impl Stream<Item = AgentEvent> + Send;
 ```
 
-**注：** Tool call 拦截 hook（`BeforeToolCallHook` / `AfterToolCallHook`）**仅在 Harness 层挂入**；Harness 通过 `HookedTool` 包装每个 `Arc<dyn Tool>` 实现，Loop 保持纯净。
+**LoopConfig 与 HarnessHooks 的关系（消除重复的真相）：**
+
+- `LoopConfig` 是 loop 层的**直接 API**。不通过 Harness 的调用方（如希望自行编排会话的低层用户）直接构造 `LoopConfig`
+- `AgentHarness` 内部维护 `HarnessHooks`，每次启动 loop 时**根据 HarnessHooks 与当前状态构造 LoopConfig**：
+  - `convert_to_llm` / `transform_context` / `prepare_next_turn` / `should_stop` / `before_provider_request` / `after_provider_response` / `auth` 直接复制
+  - `tools` 从 `HarnessState.tools` + `active_tools` 过滤，并用 `HookedTool` 包装注入 `before_tool_call` / `after_tool_call`
+  - `steer_rx` / `follow_up_rx` 从 Harness 自己持有的 channel sender 派生 receiver
+- 调用方**不应**在 Harness 已设置 HarnessHooks 时再手动构造 LoopConfig；Harness 的 API 完全屏蔽 LoopConfig
+
+`BeforeToolCallHook` / `AfterToolCallHook` **只在 Harness 中存在**——Loop 层完全没有这两个字段，避免重复。
+
+### 4.3 HookedTool（Loop 与 Harness 的 hook 桥梁）
+
+Harness 通过 `HookedTool` 在每个 tool 上挂载 `before_tool_call` / `after_tool_call`：
+
+```rust
+/// 包装一个 Tool，在 execute 时调用 before/after 钩子。
+/// Harness 在每次启动 loop 前为每个工具创建一个 HookedTool 实例。
+pub struct HookedTool {
+    pub inner:        Arc<dyn Tool>,
+    pub before:       Option<Arc<dyn BeforeToolCallHook>>,
+    pub after:        Option<Arc<dyn AfterToolCallHook>>,
+    pub turn_index:   u32,
+    pub assistant_message: Arc<AssistantMessage>,  // 由 Harness 在 turn 开始注入
+}
+
+impl Tool for HookedTool {
+    fn name(&self) -> &str { self.inner.name() }
+    fn description(&self) -> &str { self.inner.description() }
+    fn parameters_schema(&self) -> &serde_json::Value { self.inner.parameters_schema() }
+    fn execution_mode(&self) -> ToolExecutionMode { self.inner.execution_mode() }
+    fn execute<'a>(&'a self, args: serde_json::Value, ctx: &'a ToolContext)
+        -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    {
+        Box::pin(async move {
+            let effective_args = if let Some(h) = &self.before {
+                match h.on_call(BeforeToolCallCtx { /* ... */ }).await {
+                    BeforeToolCallDecision::Allow => args,
+                    BeforeToolCallDecision::Modify(a) => a,
+                    BeforeToolCallDecision::Deny(r) => return Ok(r),
+                }
+            } else { args };
+            let result = self.inner.execute(effective_args.clone(), ctx).await;
+            if let Some(h) = &self.after {
+                h.on_complete(AfterToolCallCtx { /* result: &result, ... */ }).await;
+            }
+            result
+        })
+    }
+}
+```
 
 ### 4.2 Tool batch 执行：分治调度
 
@@ -522,8 +679,8 @@ pub struct Agent {
     client:       Arc<dyn LlmClient>,
     state:        Arc<std::sync::Mutex<AgentState>>,
     event_tx:     tokio::sync::broadcast::Sender<AgentEvent>,
-    steer_tx:     tokio::sync::mpsc::Sender<String>,
-    follow_up_tx: tokio::sync::mpsc::Sender<String>,
+    steer_tx:     tokio::sync::mpsc::Sender<AgentMessage>,
+    follow_up_tx: tokio::sync::mpsc::Sender<AgentMessage>,
     abort:        CancellationToken,
 }
 
@@ -575,8 +732,12 @@ pub fn set_tools(&self, tools: Vec<Arc<dyn Tool>>);
 pub fn set_system_prompt(&self, prompt: Option<String>);
 
 // === 队列操作：任何阶段均安全 ===
+/// 文本便捷形式——内部包装为 UserMessage
 pub fn steer(&self, text: impl Into<String>);
 pub fn follow_up(&self, text: impl Into<String>);
+/// 直接注入完整消息（支持多模态、含图片等）
+pub fn steer_message(&self, msg: AgentMessage);
+pub fn follow_up_message(&self, msg: AgentMessage);
 pub fn clear_steering_queue(&self);
 pub fn clear_follow_up_queue(&self);
 pub fn clear_all_queues(&self);
@@ -597,14 +758,14 @@ pub async fn wait_for_idle(&self);
 
 ### 5.3 Session（多分支树）
 
-**设计哲学：** 会话是类型化追加日志，每条 entry 含 `parent_id` 形成**真正的树**。多个 leaf 表示并存的分支；用户可在任意历史 entry 上 fork 出新分支；`navigate_tree(target)` 切换活跃 leaf。
+**设计哲学：** 会话是类型化追加日志，每条 entry 含 `parent_id` 形成**真正的树**。多个 leaf 表示并存的分支；用户可在任意历史 entry 上 fork 出新分支；`navigate_to(target)` 切换写入位置。
 
 **核心概念：**
 - **Entry tree**：所有 entry 按 `parent_id` 链接成树（root 的 parent = None）
 - **Leaf**：任何一个没有子 entry 的节点；每条分支对应一个 leaf
-- **Active leaf** (`leaf_id`)：当前写入指向的 leaf，新 entry 的 `parent_id = leaf_id`
+- **Active cursor** (`active_cursor`)：下一次 append 时新 entry 的 `parent_id` 指向。命名**不**用 "active_leaf"——fork 操作会把 cursor 临时指向树的内部节点（非 leaf），下一条 append 才创造出新 leaf。
 - **Branch**：从 root 到任一 leaf 的路径
-- **Fork**：在一条已有路径的中间 entry 上追加新 entry，创造新分支
+- **Fork**：把 cursor 指向某历史 entry 后追加，新 entry 自然成为新分支的起点
 - **Cross-session fork**：把整条路径复制到新 session 作为独立时间线
 
 ```rust
@@ -629,7 +790,7 @@ pub enum SessionEntryPayload {
     /// 不强制——任何 entry 都可以成为分支起点；本 entry 仅做语义标注
     BranchPoint  { from: EntryId, label: Option<String> },
 
-    /// 分支切换记录：从 from leaf 切换到 to leaf（写入新分支的第一条 entry）
+    /// 分支切换记录：从 from cursor 切换到 to cursor（写入新分支的第一条 entry）
     BranchSwitch { from: EntryId, to: EntryId, summary: Option<String> },
 
     /// 分支摘要：AI 生成的某个分支的概要，导航时辅助理解上下文
@@ -637,16 +798,16 @@ pub enum SessionEntryPayload {
 }
 
 pub struct CompactionEntry {
-    pub summary_message:   AgentMessage,        // CompactionSummaryMessage
-    pub first_kept_entry:  EntryId,             // "从此 entry 起的历史仍有效"——下一次 compaction 边界
+    pub summary_message:   AgentMessage,
+    pub first_kept_entry:  EntryId,
     pub tokens_before:     usize,
     pub from_hook:         bool,
     pub details:           Option<serde_json::Value>,
 }
 
 pub struct BranchSummaryEntry {
-    pub leaf_id:        EntryId,                // 被摘要的分支的 leaf
-    pub from_entry:     EntryId,                // 摘要起始 entry（含）
+    pub leaf_id:        EntryId,
+    pub from_entry:     EntryId,
     pub summary:        String,
     pub token_count:    usize,
 }
@@ -656,15 +817,32 @@ pub struct BranchSummaryEntry {
 
 ```rust
 pub struct SessionMetadata {
-    pub id:           String,
-    pub name:         Option<String>,
-    pub created_at:   chrono::DateTime<chrono::Utc>,
-    pub updated_at:   chrono::DateTime<chrono::Utc>,
-    pub model:        Option<String>,
-    pub active_leaf:  Option<EntryId>,   // 当前活跃 leaf
+    pub id:                  String,
+    pub name:                Option<String>,
+    pub created_at:          chrono::DateTime<chrono::Utc>,
+    pub updated_at:          chrono::DateTime<chrono::Utc>,
+    pub model:               Option<String>,
+    pub active_cursor:       Option<EntryId>,     // 当前写入位置（可能是 leaf，也可能是 fork 后的内部节点）
+    pub parent_session_path: Option<String>,      // 跨 session fork 时引用的 source（copy_entries=false 场景）
 }
 
-/// 底层存储 trait：负责字节追加 + 树查询 + 活跃 leaf 追踪。
+pub struct CreateSessionOptions {
+    pub name:           Option<String>,
+    pub initial_model:  Option<String>,
+    pub initial_thinking_level: Option<ThinkingLevel>,
+    pub initial_tools:  Vec<String>,
+}
+
+pub struct ListSessionOptions {
+    pub limit:          Option<usize>,
+    pub offset:         Option<usize>,
+    pub order:          ListOrder,
+    pub name_contains:  Option<String>,
+}
+pub enum ListOrder { CreatedAsc, CreatedDesc, UpdatedAsc, UpdatedDesc }
+
+/// 底层存储 trait：负责字节追加 + 树查询 + 活跃 cursor 追踪。
+/// 实现方负责内部串行化——append/set_active_cursor 等写操作必须原子。
 pub trait SessionStorage: Send + Sync {
     fn metadata<'a>(&'a self) -> BoxFuture<'a, Result<SessionMetadata, SessionError>>;
 
@@ -676,26 +854,22 @@ pub trait SessionStorage: Send + Sync {
     fn get_entry<'a>(&'a self, id: EntryId)
         -> BoxFuture<'a, Result<Option<SessionEntry>, SessionError>>;
 
-    /// 列出某 entry 的所有直接子 entry（用于树形 UI）
     fn children<'a>(&'a self, parent: EntryId)
         -> BoxFuture<'a, Result<Vec<SessionEntry>, SessionError>>;
 
-    /// 列出当前所有 leaf（无子节点的 entry）
     fn all_leaves<'a>(&'a self)
         -> BoxFuture<'a, Result<Vec<EntryId>, SessionError>>;
 
-    /// 活跃 leaf：当前写入指向
-    fn active_leaf<'a>(&'a self)
+    /// 当前写入位置
+    fn active_cursor<'a>(&'a self)
         -> BoxFuture<'a, Result<Option<EntryId>, SessionError>>;
 
-    fn set_active_leaf<'a>(&'a self, id: EntryId)
+    fn set_active_cursor<'a>(&'a self, id: EntryId)
         -> BoxFuture<'a, Result<(), SessionError>>;
 
-    /// 从指定 entry 回溯到 root 的路径（root 在前）
     fn path_to_root<'a>(&'a self, target: EntryId)
         -> BoxFuture<'a, Result<Vec<SessionEntry>, SessionError>>;
 
-    /// 查找两个 entry 的最近公共祖先（分支 diff/合并辅助）
     fn common_ancestor<'a>(&'a self, a: EntryId, b: EntryId)
         -> BoxFuture<'a, Result<Option<EntryId>, SessionError>>;
 
@@ -721,53 +895,68 @@ pub trait SessionRepo: Send + Sync {
         -> BoxFuture<'a, Result<(), SessionError>>;
 
     /// 跨 session fork：把 source 中从 root 到 from_entry 的整条路径
-    /// 作为新 session 的初始内容，新 session 拥有独立 id 与生命周期。
-    /// entry id 全部重新分配；新 session 的 active_leaf = 复制路径的尾部
+    /// 作为新 session 的初始内容。v1 仅支持 copy_entries=true（实体复制）。
     fn fork<'a>(&'a self, source_id: &'a str, from_entry: EntryId, opts: ForkOptions)
         -> BoxFuture<'a, Result<Arc<dyn SessionStorage>, SessionError>>;
 }
 
 pub struct ForkOptions {
-    pub name:        Option<String>,
-    /// 是否复制 entry 内容；false 则仅复制 path 元数据并打 BranchPoint 引用 source
+    pub name:         Option<String>,
+    /// v1 强制为 true（完整复制 entry，重新分配 id）。
+    /// false 的引用模式涉及跨 session entry 引用，v1.x 实现。
     pub copy_entries: bool,
 }
 
-/// 高层 Session 接口：解释 Compaction，构建活跃分支的"当前有效上下文"。
-pub struct Session { storage: Arc<dyn SessionStorage> }
+/// 高层 Session 接口：解释 Compaction，构建"当前有效上下文"。
+/// 内部通过持有 storage 的 Arc 与可选 Mutex 串行化写操作。
+pub struct Session {
+    storage: Arc<dyn SessionStorage>,
+}
 
 impl Session {
-    /// 当前活跃 leaf 的原始路径（含所有 entry 类型）
+    /// 从 active_cursor 回溯到 root 的原始路径
     pub async fn read_active_path(&self) -> Result<Vec<SessionEntry>, SessionError>;
 
     /// 任意 leaf 的原始路径
     pub async fn read_path_of(&self, leaf: EntryId)
         -> Result<Vec<SessionEntry>, SessionError>;
 
-    /// 活跃分支的"有效 messages"：跳过被 Compaction 覆盖的历史，应用摘要
-    pub async fn build_context(&self) -> Result<Vec<AgentMessage>, SessionError>;
+    /// 当前活跃路径的"有效上下文"——解释 Compaction，附带最后已知配置
+    pub async fn build_context(&self) -> Result<BuiltContext, SessionError>;
 
-    /// 在活跃 leaf 下追加（最常用）
+    /// 在 active_cursor 下追加 message（最常用）。
+    /// 内部：调 storage.create_entry_id 生成 id，读 storage.active_cursor() 作为 parent_id，
+    /// 使用 Utc::now() 作为 timestamp，写入后将 active_cursor 更新为新 entry id。
     pub async fn append_message(&self, msg: AgentMessage) -> Result<EntryId, SessionError>;
+
+    /// 追加任意 payload，行为同上
     pub async fn append(&self, payload: SessionEntryPayload) -> Result<EntryId, SessionError>;
 
     // === 分支操作 ===
 
-    /// 切换活跃 leaf。target 必须是一个 leaf（无子节点）。
+    /// 切换 active_cursor 到指定 entry（可以是 leaf 或任意历史节点）。
     /// 写入一条 BranchSwitch entry 作为切换记录。
     pub async fn navigate_to(&self, target: EntryId) -> Result<(), SessionError>;
 
-    /// 在历史 entry 上 fork 新分支：将 from_entry 作为新分支的起点，
-    /// 之后写入会在 from_entry 下创建子 entry，自然成为新 leaf。
-    /// 写入 BranchPoint 标记并切换 active_leaf 到新分支起点。
+    /// 在历史 entry 上 fork 新分支：
+    /// 1. 将 active_cursor 切到 from_entry
+    /// 2. 写入一条 BranchPoint entry 标记新分支起点
+    /// 3. 之后的 append 会以 BranchPoint 为 parent_id 形成新分支
     pub async fn fork_branch(&self, from_entry: EntryId, label: Option<String>)
         -> Result<EntryId, SessionError>;
 
-    /// 列出所有分支（leaf → 该分支的简要描述）
+    /// 列出所有分支（每个 leaf 对应一条）
     pub async fn list_branches(&self) -> Result<Vec<BranchInfo>, SessionError>;
 
     /// 删除一个分支：从指定 leaf 开始向上删除，直到遇到有其他子节点的 entry
     pub async fn delete_branch(&self, leaf: EntryId) -> Result<(), SessionError>;
+}
+
+pub struct BuiltContext {
+    pub messages:           Vec<AgentMessage>,
+    pub last_model:         Option<String>,
+    pub last_thinking_level: Option<ThinkingLevel>,
+    pub last_active_tools:  Option<Vec<String>>,
 }
 
 pub struct BranchInfo {
@@ -775,18 +964,30 @@ pub struct BranchInfo {
     pub label:         Option<String>,
     pub message_count: usize,
     pub last_activity: chrono::DateTime<chrono::Utc>,
-    pub summary:       Option<String>,   // 来自最近的 BranchSummary entry
+    pub summary:       Option<String>,
 }
 
 pub struct JsonlSessionRepo  { root_dir: PathBuf }
 pub struct InMemorySessionRepo { /* ... */ }
 ```
 
-**JSONL 存储策略：** 单 session 单文件，所有 entry 按时间顺序 append。文件本身是线性日志，树结构由 `parent_id` 在读取时重建。`active_leaf` 持久化到 session metadata（独立的 `.meta.json`）。
+**并发安全：** `Session` 的方法签名是 `&self`——允许多 caller 共享 `Arc<Session>`。串行化在 `SessionStorage` 实现内：
+- `JsonlSessionStorage` 内部持有 `tokio::sync::Mutex<Internal>`，所有 append/set_active_cursor/path query 串行化
+- 高层组合操作（如 `fork_branch` = set_active_cursor + append BranchPoint）在 Session 内通过持有同一锁保证两步原子
+- 调用方仍需注意逻辑层并发——同时 `navigate_to(A)` 与 `navigate_to(B)` 不会损坏存储，但最终落到哪个是非确定性的
 
-**分支摘要生成：** `generate_branch_summary(client, session, leaf)` 在 Harness 层提供，调用 `summary_model` 生成 BranchSummary entry。导航到该分支时 UI 可显示摘要。
+**JSONL 存储策略 + 缓存：**
+- 单 session 单文件，所有 entry 按时间 append；树结构由 `parent_id` 重建
+- `active_cursor` + metadata 持久化到独立的 `.meta.json`
+- `JsonlSessionStorage` 内部维护 in-memory 树缓存（`HashMap<EntryId, SessionEntry>` + `HashMap<EntryId, Vec<EntryId>>` 子节点表）：
+  - 首次访问时 mmap/读全量文件构建
+  - 每次 `append_entry` 增量更新缓存（O(1) 插入）
+  - `path_to_root` / `children` / `all_leaves` 直接走内存，O(path length) 或 O(1)
+- 大文件（>10k entries）通过 fs::Metadata::len 触发懒加载策略
 
-**Compaction 与分支的交互：** 每个分支独立追踪 compaction 历史——`first_kept_entry` 沿 parent_id 链向上追溯，找到本分支最近一次 Compaction entry 作为基准。fork 出的新分支继承父分支的 compaction 历史；fork 后新写入的 entry 形成本分支的新 compaction 边界。
+**分支摘要生成：** `generate_branch_summary(client, session, leaf)` 在 Harness 层提供，调用 `summary_model` 生成 BranchSummary entry。
+
+**Compaction 与分支的交互：** 每个分支独立追踪 compaction 历史——`first_kept_entry` 沿 parent_id 链向上追溯，找到本分支最近一次 Compaction entry 作为基准。fork 出的新分支继承父分支的 compaction 历史。
 
 ### 5.4 Compaction（基于 session entries）
 
@@ -797,12 +998,14 @@ pub struct InMemorySessionRepo { /* ... */ }
 
 ```rust
 pub struct CompactionSettings {
-    pub enabled:           bool,
-    pub token_threshold:   usize,           // 超过触发压缩
-    pub keep_recent_tokens: usize,           // 保留尾部 N tokens 不压缩
-    pub reserve_tokens:    usize,           // 为 LLM 响应预留
-    pub summary_model:     String,          // 用便宜模型做摘要
-    pub summary_model_info: Option<ModelInfo>,
+    pub enabled:            bool,
+    /// 触发条件：token 数 > `model_info.context_window - reserve_tokens`
+    pub reserve_tokens:     usize,
+    /// 保留尾部 N tokens 不压缩
+    pub keep_recent_tokens: usize,
+    pub summary_model:      String,
+    /// 摘要模型的完整元数据——compaction 必需用于 token 估算
+    pub summary_model_info: ModelInfo,
 }
 
 /// 中间类型——分离决策（是否压缩、切点）与执行（调 LLM 生成摘要）
@@ -817,11 +1020,14 @@ pub struct CompactionPreparation {
 }
 
 pub fn prepare_compaction(
-    path:        &[SessionEntry],
+    path:            &[SessionEntry],
     last_compaction: Option<&CompactionEntry>,
-    settings:    &CompactionSettings,
+    settings:        &CompactionSettings,
+    model_info:      &ModelInfo,   // 主对话的 model info，用于估算阈值
 ) -> Option<CompactionPreparation>;  // None = 无需压缩
 
+/// `auth` 为可选——若 None，使用 `client` 自身已配置的认证；
+/// 若 Some，每次调用前调用 hook 刷新 api_key/headers（OAuth 场景）。
 pub async fn compact(
     client:      &dyn LlmClient,
     preparation: CompactionPreparation,
@@ -863,6 +1069,12 @@ pub struct Skill {
 }
 
 pub struct SkillDiagnostic { pub source: PathBuf, pub level: DiagnosticLevel, pub message: String }
+// DiagnosticLevel 定义见 §3.1
+
+pub struct SourcedSkill {
+    pub skill:  Skill,
+    pub source_tag: String,  // 调用方提供的来源标记（如 "user-config", "project-local"）
+}
 
 /// 递归扫描目录；每目录只取第一个 SKILL.md（不递归子目录的 SKILL.md）。
 /// 校验 name 匹配父目录名。遵守 .gitignore / .ignore / .fdignore。
@@ -913,16 +1125,21 @@ pub fn invoke_template(
 
 ```rust
 pub struct AgentHarness {
-    client:       Arc<dyn LlmClient>,
-    session:      Session,
-    env:          Arc<dyn ExecutionEnv>,
-    skills:       Vec<Skill>,
-    templates:    Vec<PromptTemplate>,
-    state:        Arc<std::sync::Mutex<HarnessState>>,
-    event_tx:     tokio::sync::broadcast::Sender<AgentHarnessEvent>,
-    hooks:        HarnessHooks,
+    client:         Arc<dyn LlmClient>,
+    session:        Session,
+    env:            Arc<dyn ExecutionEnv>,
+    skills:         Vec<Skill>,
+    templates:      Vec<PromptTemplate>,
+    state:          Arc<std::sync::Mutex<HarnessState>>,
+    event_tx:       tokio::sync::broadcast::Sender<AgentHarnessEvent>,
+    convert_to_llm: Arc<dyn ConvertToLlmHook>,   // 来自 loop crate，独立于 HarnessHooks
+    hooks:          HarnessHooks,
     stream_options: StreamOptions,
-    auth:         Option<Arc<dyn AuthHook>>,
+    auth:           Option<Arc<dyn AuthHook>>,
+    // 内部 channels（外部不可见）
+    steer_tx:       tokio::sync::mpsc::Sender<AgentMessage>,
+    follow_up_tx:   tokio::sync::mpsc::Sender<AgentMessage>,
+    abort:          CancellationToken,
 }
 
 pub struct HarnessState {
@@ -936,13 +1153,18 @@ pub struct HarnessState {
     pub streaming_message: Option<AssistantMessage>,
     pub pending_tool_calls: HashSet<String>,
     pub pending_session_writes: Vec<SessionEntryPayload>, // 运行中延迟写入
+    pub queued_next_turn:  Vec<AgentMessage>,           // next_turn 缓冲：下次 prompt 时合并到初始消息
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum HarnessPhase { Idle, Turning, Compacting, Branching }
 
+/// HarnessHooks 是 Harness 内 hook 的**唯一真相源**。
+/// Harness 不暴露 LoopConfig 给调用方；每次启动 loop 时由 Harness 内部从 HarnessHooks
+/// 与 HarnessState 构造一个临时 LoopConfig（详见 §4.2 末尾的翻译规则）。
+/// convert_to_llm 不在 HarnessHooks 中——它是 loop crate 定义的 trait，
+/// Harness 在 new() 时接受一份 Arc<dyn ConvertToLlmHook> 字段保存，构造 LoopConfig 时填入。
 pub struct HarnessHooks {
-    pub convert_to_llm:           Arc<dyn ConvertToLlmHook>,
     pub before_turn:              Option<Arc<dyn BeforeTurnHook>>,
     pub after_turn:               Option<Arc<dyn AfterTurnHook>>,
     pub before_tool_call:         Option<Arc<dyn BeforeToolCallHook>>,
@@ -1048,11 +1270,116 @@ pub async fn wait_for_settled(&self);  // 所有 pending session writes 落盘
 
 **Pending session writes：** Harness 运行 turn 期间，配置变更（set_model 等）和消息记录通过 `pending_session_writes` 缓冲；turn 结束的 save point 一次性 flush，避免 turn 进行中频繁 IO 与 session 状态闪烁。
 
+**`next_turn` 注入机制（无独立 channel）：** `harness.next_turn(text)` 不通过 channel，而是直接将消息追加到 `HarnessState.queued_next_turn`。下一次 `prompt()` 调用时：
+
+```rust
+async fn prompt(&self, text: String) -> Result<()> {
+    // 1. 检查 Idle 阶段
+    // 2. 取出 queued_next_turn 缓冲
+    let queued = {
+        let mut st = self.state.lock().unwrap();
+        if st.phase != HarnessPhase::Idle { return Err(NotIdle); }
+        std::mem::take(&mut st.queued_next_turn)
+    };
+    // 3. 合并：queued ++ [user(text)]
+    let initial = queued.into_iter().chain(once(make_user(text))).collect();
+    self.run_loop(initial).await
+}
+```
+
+**事件处理管道（伪代码）：**
+
+```rust
+async fn run_loop(&self, initial_messages: Vec<AgentMessage>) -> Result<()> {
+    // 1. 设置 Phase = Turning
+    self.set_phase(HarnessPhase::Turning);
+
+    // 2. 从 session 重建上下文，与 initial_messages 合并
+    let built = self.session.build_context().await?;
+    let ctx = AgentContext {
+        system_prompt: self.compose_system_prompt(),  // 含 skills
+        messages: built.messages.into_iter().chain(initial_messages).collect(),
+    };
+
+    // 3. 构造 LoopConfig（从 HarnessHooks + state）
+    let cfg = self.build_loop_config();
+    // 关键：在 build_loop_config 中：
+    //  - 用 HookedTool 包装每个 tool 注入 before/after_tool_call
+    //  - 复制其他 hook
+    //  - 派生 steer_rx / follow_up_rx
+
+    let mut stream = agent_loop(self.client.clone(), ctx, cfg);
+
+    while let Some(event) = stream.next().await {
+        match event {
+            AgentEvent::TurnStart { index } => {
+                self.emit(AgentHarnessEvent::Agent(event));
+            }
+            AgentEvent::MessageEnd { ref message, .. } => {
+                // 把 assistant message 加入 pending writes
+                self.push_pending_write(SessionEntryPayload::Message(
+                    AgentMessage::Assistant(message.clone())
+                ));
+                self.emit(AgentHarnessEvent::Agent(event));
+            }
+            AgentEvent::ToolExecutionStart { ref tool_use_id, .. } => {
+                self.state.lock().unwrap().pending_tool_calls.insert(tool_use_id.clone());
+                self.emit(AgentHarnessEvent::Agent(event));
+            }
+            AgentEvent::ToolExecutionEnd { ref tool_use_id, ref result, .. } => {
+                self.state.lock().unwrap().pending_tool_calls.remove(tool_use_id);
+                // 把 tool result 加入 pending writes
+                self.push_pending_write(SessionEntryPayload::Message(
+                    AgentMessage::ToolResult(/* 从 result 构造 */)
+                ));
+                self.emit(AgentHarnessEvent::Agent(event));
+            }
+            AgentEvent::TurnEnd { .. } => {
+                // Save point: flush pending session writes 到 storage
+                let flushed = self.flush_pending_writes().await?;
+                self.emit(AgentHarnessEvent::SavePoint { entries_flushed: flushed });
+                self.emit(AgentHarnessEvent::Agent(event));
+            }
+            AgentEvent::AgentEnd { .. } => {
+                self.emit(AgentHarnessEvent::Agent(event));
+                self.emit(AgentHarnessEvent::Settled);
+                break;
+            }
+            AgentEvent::Error(err) => {
+                self.state.lock().unwrap().error_message = Some(err.to_string());
+                self.emit(AgentHarnessEvent::Agent(AgentEvent::Error(err)));
+            }
+            other => {
+                self.emit(AgentHarnessEvent::Agent(other));
+            }
+        }
+    }
+
+    // 4. 恢复 Phase = Idle
+    self.set_phase(HarnessPhase::Idle);
+    Ok(())
+}
+```
+
+**`prepare_next_turn` 与 `set_active_tools` 的交互：** Harness 实现 `PrepareNextTurnHook` 的默认 wrapper——它在 hook 调用时读取最新 `HarnessState`（含 `active_tools`），并把 `NextTurnDirective.tools` / `active_tools` 字段填入。这是反向读取 HarnessState 的合法路径：wrapper 在闭包内持有 `Arc<Mutex<HarnessState>>`，仅在 hook 调用瞬间短锁读取——不跨 await。
+
 ## 6. 关键设计决策汇总
 
 | 决策 | 选择 | 理由 |
 |---|---|---|
 | 事件模型 | 消息级 + token 级双层（含 AgentStart/End、MessageStart/End 携 payload） | 同时支持消息列表 UI 与字符流 UI；Agent↔Harness 通过 AgentEnd payload 传递结果 |
+| ConvertToLlmHook 位置 | 定义在 `llm-harness-loop`（不在 types） | types crate 维持零 IO 约束 |
+| Hook 真相源 | HarnessHooks 唯一源；Harness 每次构造临时 LoopConfig | 消除字段重复，明确翻译路径 |
+| HookedTool | tool wrapper，承载 before/after_tool_call | Loop 层不接受 tool call hook |
+| next_turn 注入 | HarnessState.queued_next_turn 缓冲，下次 prompt 时合并 | 无需新 channel |
+| Steer/follow_up 类型 | `AgentMessage` channel + `&str` 便捷方法 | 支持多模态（图片等） |
+| active_cursor 命名 | 弃用 active_leaf——fork 后会指向非 leaf | 命名准确反映"下次 append 的 parent" |
+| Session::append 内部 | 自动填 id（storage.create_entry_id）/parent_id（active_cursor）/timestamp | 调用方零负担 |
+| Session 并发 | Storage 内部 Mutex 串行化；高层组合操作持同一锁 | JSONL append + meta 更新原子 |
+| JSONL 缓存 | Storage 内部维护内存树缓存，append 增量更新 | 避免每次树查询全量扫描 |
+| CompactionSettings | 删除 token_threshold，触发条件统一为 context_window - reserve_tokens | 消除语义重叠；强制 summary_model_info |
+| BuiltContext | build_context 返回 messages + 最后已知 model/thinking/tools | session 重建完整运行时配置 |
+| 事件处理管道 | Harness 内部明确伪代码定义事件→pending writes→save point 流转 | 核心正确性可审计 |
 | 消息富类型 | AssistantMessage 携 usage/timestamp/provider/model/error | compaction 估算、回放、错误处理需要 |
 | ThinkingContent | 一等公民 ContentBlock variant | Anthropic extended thinking 必需，compaction 时保留思考 |
 | Custom message | 框架内置 BranchSummary/CompactionSummary 为具名 variant；其他走 CustomMessage + 必需 ConvertToLlmHook | 类型安全 + 灵活扩展 |
