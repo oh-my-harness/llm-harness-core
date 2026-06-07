@@ -1,7 +1,7 @@
 # llm-harness-core 系统设计
 
 **日期：** 2026-06-07
-**状态：** 已批准（v5，纳入自洽性审核修订）
+**状态：** 已批准（v6，纳入模块边界审核修订）
 
 ## 1. 背景与目标
 
@@ -43,7 +43,7 @@ llm-harness-loop               llm-harness
 
 **职责：** 零 IO 的纯类型层。所有跨 crate 共享的类型和 trait 均在此定义。
 
-**依赖：** `serde`, `serde_json`, `futures`（`BoxFuture`），`tokio-util`（`CancellationToken`），`thiserror`，`uuid`，`chrono`
+**依赖：** `serde`, `serde_json`, `futures`（`BoxFuture`），`tokio`（feature = `sync`，用于 `mpsc::Sender`），`tokio-util`（`CancellationToken`），`thiserror`，`uuid`，`chrono`
 
 **外部类型说明：**
 - `LlmClient`：由 `llm-api-adapter` 提供的 trait，代表可发起流式 LLM 调用的客户端
@@ -125,7 +125,7 @@ pub enum TemplateError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum HarnessError {
-    #[error("harness is not idle (current phase: {0:?})")] NotIdle(crate::HarnessPhase),
+    #[error("harness is not idle (current phase: {0:?})")] NotIdle(HarnessPhase),
     #[error("skill not found: {0}")]                        SkillNotFound(String),
     #[error("template not found: {0}")]                     TemplateNotFound(String),
     #[error(transparent)]                                   Agent(#[from] AgentError),
@@ -137,6 +137,11 @@ pub enum HarnessError {
 
 #[derive(Debug, Clone, Copy)]
 pub enum DiagnosticLevel { Warn, Error }
+
+/// Harness 运行阶段——提升到 types 是因为 HarnessError::NotIdle 需要携带它。
+/// AgentPhase 留在 llm-harness 中（AgentError::NotIdle 无 payload）。
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub enum HarnessPhase { Idle, Turning, Compacting, Branching }
 ```
 
 ### 3.2 ContentBlock 与消息类型
@@ -498,6 +503,45 @@ pub struct StreamOptions {
 **职责：** 纯函数式 agent loop——给定上下文与配置，返回事件流。不持有持久状态。
 
 **依赖：** `llm-harness-types`, `llm-api-adapter`, `tokio`, `tokio-stream`, `futures`
+
+**重导出（必需）：** 下游 `llm-harness` 不直接依赖 `llm-api-adapter`；loop 通过 `pub use` 暴露下游需要的类型：
+
+```rust
+// llm-harness-loop/src/lib.rs
+pub use llm_api_adapter::{LlmClient, ModelInfo, Message as LlmMessage, StreamEvent};
+```
+
+**`LlmClient` 的假定核心签名**（实际定义在 `llm-api-adapter`，此处给出 loop 实现所依赖的最小接口）：
+
+```rust
+// 来自 llm-api-adapter（不在本 crate 定义，仅说明 loop 的使用契约）
+pub trait LlmClient: Send + Sync {
+    fn stream<'a>(
+        &'a self,
+        model:    &'a str,
+        messages: &'a [LlmMessage],
+        system:   Option<&'a str>,
+        tools:    &'a [ToolDef],
+        options:  &'a StreamOptions,
+        auth:     Option<&'a AuthInfo>,
+    ) -> BoxStream<'a, Result<StreamEvent, LlmError>>;
+}
+
+pub enum StreamEvent {
+    MessageStart { id: String, model: String, provider: String, api: String },
+    TextDelta    { text: String },
+    ThinkingDelta { thinking: String, signature: Option<String> },
+    ToolUseStart { id: String, name: String },
+    ToolUseDelta { id: String, partial_input: String },
+    ToolUseEnd   { id: String, input: serde_json::Value },
+    MessageEnd   { stop_reason: StopReason, usage: TokenUsage },
+    Error(LlmError),
+}
+
+pub struct ToolDef { pub name: String, pub description: String, pub parameters: serde_json::Value }
+```
+
+如 llm-api-adapter 的实际接口与此存在偏差，loop 内做适配。
 
 ### 4.1 `ConvertToLlmHook`（定义在此 crate，因依赖 `llm-api-adapter`）
 
@@ -1119,6 +1163,8 @@ pub fn invoke_template(
 ) -> Result<String, TemplateError>;
 ```
 
+**测试策略：** Skills 和 Templates 的加载逻辑依赖 `dyn ExecutionEnv`。v1 **不**提供 `InMemoryEnv` mock——测试通过 `tempfile::TempDir` + `OsEnv` 真实运行：在临时目录布置 `SKILL.md` / 模板文件，调用 `load_skills()`，验证返回值。这样既覆盖了真实 fs 行为，又避免维护双重 env 实现。后续若需要 hermetic 测试再引入 `InMemoryEnv`。
+
 ### 5.6 AgentHarness
 
 编排层：直接驱动 `agent_loop()`（不内嵌 Agent），自己管理 session 写入、配置变更记录、resource 解析。
@@ -1156,8 +1202,7 @@ pub struct HarnessState {
     pub queued_next_turn:  Vec<AgentMessage>,           // next_turn 缓冲：下次 prompt 时合并到初始消息
 }
 
-#[derive(PartialEq, Clone, Copy, Debug)]
-pub enum HarnessPhase { Idle, Turning, Compacting, Branching }
+// HarnessPhase 定义在 §3.1（types crate）以便 HarnessError::NotIdle 携带
 
 /// HarnessHooks 是 Harness 内 hook 的**唯一真相源**。
 /// Harness 不暴露 LoopConfig 给调用方；每次启动 loop 时由 Harness 内部从 HarnessHooks
@@ -1404,6 +1449,10 @@ async fn run_loop(&self, initial_messages: Vec<AgentMessage>) -> Result<()> {
 | PromptTemplate | 位置参数 + shell-style 引号解析 | 对齐现有模板生态 |
 | 图片引用 | `ImageSource` enum 预留 URL/Id | 避免 base64 锁死 |
 | Crate 拆分 | workspace + 3 crates | 关注点分离 |
+| HarnessPhase 位置 | types crate（与 HarnessError 同级） | HarnessError::NotIdle 需携带 HarnessPhase；避免跨 crate 引用编译错 |
+| LlmClient 签名 | spec 中以注释形式给出假定接口 | loop 实施可直接开始，不阻塞于 llm-api-adapter 接口落地 |
+| ModelInfo 暴露 | loop crate 通过 `pub use` 重导出 LlmClient/ModelInfo/LlmMessage/StreamEvent | harness 不直接依赖 llm-api-adapter |
+| Skills/Templates 测试 | tempfile + OsEnv 真实 fs，无 InMemoryEnv | 避免维护双重 env 实现 |
 
 ## 7. 不在范围内（v1）
 
@@ -1416,3 +1465,43 @@ async fn run_loop(&self, initial_messages: Vec<AgentMessage>) -> Result<()> {
 - **Agent loop 以外的框架能力**（规划、记忆管理）：调用方责任
 - **典型应用层组件**（如内置 bash tool / file edit tool）：作为示例代码或独立 crate 提供
 - **分支可视化 UI**：框架提供数据接口（`list_branches`、tree 查询），UI 由调用方实现
+
+## 8. 实施路线图
+
+依赖拓扑：`types → loop → harness`。harness 内部进一步分为可并行的子系统。
+
+```
+阶段 1 (types) ─────────────────────────────────────────────────
+                │
+                ▼
+阶段 2 (loop) ──────────────────────────────────────────────────
+                │
+                ▼
+        ┌───────┴──────────┬──────────────────┐
+        ▼                  ▼                  ▼
+阶段 3 (Agent)    阶段 4 (Session)    阶段 6 (Skills/Templates)
+        │                  │                  │
+        │                  ▼                  │
+        │          阶段 5 (Compaction)        │
+        │                  │                  │
+        └──────────────────┴──────────────────┘
+                           │
+                           ▼
+                阶段 7 (AgentHarness)
+```
+
+| 阶段 | 内容 | 关键测试 | 阻塞依赖 |
+|---|---|---|---|
+| 1 | types 全部类型 + trait 声明 | 纯数据 derive 与序列化 roundtrip | 无 |
+| 2 | LoopConfig / HookedTool / agent_loop / agent_loop_continue / DefaultConvertToLlm | `MockLlmClient` 驱动的事件序列正确性 + tool batch 分治 | 阶段 1 完成 |
+| 3 | Agent / AgentState / 队列方法 / continue_run / reset | 状态机转换、abort、并发 prompt、subscribe 完整事件 | 阶段 2 完成 |
+| 4 | SessionEntry / SessionStorage / SessionRepo / Session / 内存 + JSONL 实现 / 分支操作 | 树操作、fork、navigate、build_context、并发 append | 阶段 1 完成 |
+| 5 | CompactionSettings / prepare_compaction / compact / FileOperation | 纯函数 cut point + MockLlmClient 集成 | 阶段 4 数据结构稳定 |
+| 6 | Skills / PromptTemplates / load_skills / invoke_template | tempfile + OsEnv 真实 fs 加载 | 阶段 1 完成 |
+| 7 | AgentHarness / HarnessHooks / 事件管道 / 分支 API / next_turn 注入 | 集成测试：prompt → tool → session 写入 → compact → fork → navigate | 阶段 2-6 全部完成 |
+
+**并行机会：** 阶段 3、4、6 可在阶段 2 完成后同时启动（三者互不依赖）。阶段 5 在阶段 4 的 SessionEntry / SessionStorage 数据结构定稿后即可启动。
+
+**测试基础设施（实施任务，不进 spec 主体）：**
+- loop crate 提供 feature-gated `test-utils` 模块导出 `MockLlmClient`
+- harness 集成测试用 `InMemorySessionRepo` + `MockLlmClient` + `tempfile::TempDir`
