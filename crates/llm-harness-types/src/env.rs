@@ -32,6 +32,7 @@ pub struct FileInfo {
 }
 
 /// Shell 命令执行选项。
+#[allow(clippy::type_complexity)]
 pub struct ShellOptions<'a> {
     /// 覆盖工作目录；`None` 表示使用 env 默认工作目录。
     pub cwd: Option<&'a Path>,
