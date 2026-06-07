@@ -1,7 +1,9 @@
 # llm-harness-core 系统设计
 
 **日期：** 2026-06-07
-**状态：** 已批准（v6，纳入模块边界审核修订）
+**状态：** 已批准（v7，全量设计说明注释）
+
+> **阅读指南：** 本文档是设计总纲——汇总关键决策、不在范围、实施路线图。各模块的详细类型定义、接口签名、**设计理由**（为什么这么设计、每个字段/函数的作用、设计取舍）分散在以下 7 个阶段文档中。每个阶段文档以 `>` 开头的块引用为设计说明注释，解释结构体/枚举/trait/函数的含义、作用、以及为什么是这么设计的。
 
 ## 1. 背景与目标
 
@@ -69,7 +71,7 @@ llm-harness-loop               llm-harness
 | BuiltContext | build_context 返回 messages + 最后已知 model/thinking/tools | session 重建完整运行时配置 |
 | 事件处理管道 | Harness 内部明确伪代码定义事件→pending writes→save point 流转 | 核心正确性可审计 |
 | 消息富类型 | AssistantMessage 携 usage/timestamp/provider/model/error | compaction 估算、回放、错误处理需要 |
-| ThinkingContent | 一等公民 ContentBlock variant | Anthropic extended thinking 必需，compaction 时保留思考 |
+| ThinkingContent | 一等公民 ContentBlock variant | Anthropic/OpenAI/DeepSeek 等均支持 provider 推理；compaction 时必须保留思考痕迹 |
 | Custom message | 框架内置 BranchSummary/CompactionSummary 为具名 variant；其他走 CustomMessage + 必需 ConvertToLlmHook | 类型安全 + 灵活扩展 |
 | 工具定义 | `dyn Tool` trait，含 label / prepare_arguments / onUpdate channel / terminate | UI 友好 + LLM 参数兼容 + 流式工具输出 + 自主停止 |
 | 工具调度 | 分治：按 Sequential 切子组，组内并发 | 避免连坐降级 |
