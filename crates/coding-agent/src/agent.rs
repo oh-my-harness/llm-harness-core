@@ -74,6 +74,7 @@ pub struct CodingAgentBuilder {
     extra_guidelines: Vec<String>,
     custom_prompt: Option<String>,
     append_prompt: Option<String>,
+    session_name: Option<String>,
 }
 
 impl CodingAgentBuilder {
@@ -96,6 +97,7 @@ impl CodingAgentBuilder {
             extra_guidelines: vec![],
             custom_prompt: None,
             append_prompt: None,
+            session_name: None,
         }
     }
 
@@ -199,6 +201,12 @@ impl CodingAgentBuilder {
         self
     }
 
+    /// Set a human-readable name for the session (shown in --list-sessions).
+    pub fn session_name(mut self, name: impl Into<String>) -> Self {
+        self.session_name = Some(name.into());
+        self
+    }
+
     /// Build the `CodingAgent`.
     pub async fn build(self) -> Result<CodingAgent, BuildError> {
         let cwd = self
@@ -272,9 +280,12 @@ impl CodingAgentBuilder {
                     .await
                     .map_err(|e| BuildError::SessionDir(e.to_string()))?
             } else {
-                repo.create(CreateSessionOptions::default())
-                    .await
-                    .map_err(|e| BuildError::SessionDir(e.to_string()))?
+                repo.create(CreateSessionOptions {
+                    name: self.session_name,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| BuildError::SessionDir(e.to_string()))?
             };
             let sid = storage
                 .metadata()

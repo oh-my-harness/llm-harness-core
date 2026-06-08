@@ -101,6 +101,11 @@ async fn run() -> i32 {
         builder = builder.resume_session(id);
     }
 
+    // Set session name if provided.
+    if let Some(name) = resolve_flag_value(&args, "--name") {
+        builder = builder.session_name(name);
+    }
+
     // Wire max_tokens from settings (env override not provided — settings win over default).
     if let Some(mt) = settings_mgr.settings().max_tokens {
         builder = builder.max_tokens(mt);
@@ -261,7 +266,7 @@ fn resolve_prompt(args: &[String]) -> Result<String, String> {
             skip_next = false;
             continue;
         }
-        if arg == "--session-id" {
+        if arg == "--session-id" || arg == "--name" {
             skip_next = true;
             continue;
         }
@@ -286,8 +291,12 @@ fn resolve_prompt(args: &[String]) -> Result<String, String> {
 }
 
 fn resolve_session_id(args: &[String]) -> Option<String> {
+    resolve_flag_value(args, "--session-id")
+}
+
+fn resolve_flag_value(args: &[String], flag: &str) -> Option<String> {
     for i in 0..args.len() {
-        if args[i] == "--session-id" && i + 1 < args.len() {
+        if args[i] == flag && i + 1 < args.len() {
             return Some(args[i + 1].clone());
         }
     }

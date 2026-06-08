@@ -126,9 +126,10 @@ impl SessionRepo for InMemorySessionRepo {
             for s in sessions {
                 let m = s.metadata().await?;
                 if let Some(ref needle) = opts.name_contains
-                    && !m.name.as_deref().unwrap_or("").contains(needle.as_str()) {
-                        continue;
-                    }
+                    && !m.name.as_deref().unwrap_or("").contains(needle.as_str())
+                {
+                    continue;
+                }
                 metas.push(m);
             }
 

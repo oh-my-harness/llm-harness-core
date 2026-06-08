@@ -217,9 +217,10 @@ impl SessionStorage for InMemorySessionStorage {
             // For simplicity we scan all entries (acceptable for in-memory).
             for entry in st.entries.values() {
                 if let SessionEntryPayload::Label { name } = &entry.payload
-                    && entry.parent_id == Some(id) {
-                        return Ok(Some(name.clone()));
-                    }
+                    && entry.parent_id == Some(id)
+                {
+                    return Ok(Some(name.clone()));
+                }
             }
             Ok(None)
         })

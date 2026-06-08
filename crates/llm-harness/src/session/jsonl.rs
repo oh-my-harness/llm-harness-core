@@ -253,9 +253,10 @@ impl SessionStorage for JsonlSessionStorage {
             Self::ensure_loaded(&mut inner).await?;
             for entry in inner.entry_map.values() {
                 if let SessionEntryPayload::Label { name } = &entry.payload
-                    && entry.parent_id == Some(id) {
-                        return Ok(Some(name.clone()));
-                    }
+                    && entry.parent_id == Some(id)
+                {
+                    return Ok(Some(name.clone()));
+                }
             }
             Ok(None)
         })
@@ -400,9 +401,10 @@ impl SessionRepo for JsonlSessionRepo {
                     Err(_) => continue,
                 };
                 if let Some(ref needle) = opts.name_contains
-                    && !meta.name.as_deref().unwrap_or("").contains(needle.as_str()) {
-                        continue;
-                    }
+                    && !meta.name.as_deref().unwrap_or("").contains(needle.as_str())
+                {
+                    continue;
+                }
                 metas.push(meta);
             }
             metas.sort_by(|a, b| match opts.order {

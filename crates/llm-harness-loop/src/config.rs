@@ -123,11 +123,11 @@ mod tests {
     #[test]
     #[cfg(feature = "test-utils")]
     fn loop_config_compiles() {
-        use std::sync::Arc;
+        use crate::LoopConfig;
         use crate::convert::DefaultConvertToLlm;
         use crate::test_utils::NoOpEnv;
-        use crate::LoopConfig;
         use llm_harness_types::{StreamOptions, ThinkingLevel, ToolExecutionMode};
+        use std::sync::Arc;
         use tokio_util::sync::CancellationToken;
         let _cfg = LoopConfig {
             model: "test-model".into(),
