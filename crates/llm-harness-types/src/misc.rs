@@ -1,12 +1,14 @@
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{AgentMessage, Tool};
 
 /// Provider 推理深度级别。
 ///
 /// 各 provider 的实际映射由 `llm-api-adapter` 负责（如 Anthropic → `budget_tokens`，
 /// OpenAI → `reasoning_effort`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThinkingLevel {
     /// 禁用推理（节省 token）。
     Off,

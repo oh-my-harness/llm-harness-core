@@ -8,7 +8,7 @@
 > 在开始实现每个阶段之前，需要重新评估范围和优先级。
 > 当前内容仅供参考和讨论。
 
-**日期：** 2026-06-07
+**日期：** 2026-06-07（更新：2026-06-08）
 **来源：** 基于 TypeScript 参考实现 `pi/packages/coding-agent` 的分析
 **目标：** 梳理从当前 `llm-harness-core` 框架到可用的 coding agent 需要建设的所有模块
 
@@ -16,24 +16,29 @@
 
 ## 一、当前状态
 
-### ✅ 已完成（~3500 行 Rust）
+### ✅ 已完成（~5500 行 Rust）
 
 | 阶段 | Crate | 内容 |
 |---|---|---|
-| **Phase 1** | `llm-harness-types` | 全部 11 个模块：messages、content、events、tool、env、errors、hooks、compaction（stub）、identity、misc、resources（stub）|
+| **Phase 1** | `llm-harness-types` | 全部 11 个模块：messages、content、events、tool、env、errors、hooks、compaction（完整版）、identity、misc、resources（stub）|
 | **Phase 2** | `llm-harness-loop` | `agent_loop`/`agent_loop_continue`、`LoopConfig`、`HookedTool`、工具分治调度、`type_bridge`、`DefaultConvertToLlm`、`test_utils`（`MockLlmClient`）|
+| **Phase 3** | `llm-harness` | `Agent` + `AgentState` + `AgentPhase` + `ModelInfo`；全部方法（`prompt`/`prompt_with_messages`/`continue_run`/`reset`/`set_*`/`steer`/`follow_up`/`abort`/`wait_for_idle`/`subscribe`/`state`）；8 个测试通过 |
+| **Phase 4** | `llm-harness` | `SessionEntry`/`SessionEntryPayload`（11 种变体）、`SessionStorage` trait、`InMemorySessionStorage`、`SessionRepo` trait、`InMemorySessionRepo`、`JsonlSessionStorage`、`JsonlSessionRepo`、`Session`（`build_context`/`append`/`navigate_to`/`fork_branch`/`list_branches`）；10 个测试通过 |
+| **Phase 5** | `llm-harness` | `CompactionSettings`、`CompactionPreparation`、`prepare_compaction`（纯函数，token 估算 + cut point 决策）、`compact`（async LLM 调用生成摘要）；`CompactionResult`/`FileOperation`/`FileOpKind` 升级为完整版；6 个测试通过 |
+| **Phase 6** | `llm-harness` | `Skill`/`SkillDiagnostic`/`SourcedSkill`/`PromptTemplate`、`load_skills`/`load_sourced_skills`/`load_prompt_templates`（`OsEnv` 真实 fs）、`format_skills_for_system_prompt`/`format_skill_invocation`、`invoke_template`（位置参数展开）、`parse_command_args`（shell 引号解析）；`OsEnv` 完整 `ExecutionEnv` 实现；20 个测试通过 |
 
 ### ❌ 未完成
 
 **框架层**（spec 中有设计，但无实现）：
-- Phase 3: Agent
-- Phase 4: Session
-- Phase 5: Compaction
-- Phase 6: Skills / Templates
 - Phase 7: AgentHarness
 
 **应用层**（coding-agent，spec 中未覆盖）：
 - 全部 15 个模块（下文第二部分详述）
+
+### 📝 实现备注
+
+- `AgentEvent` 未实现 `Clone`（因 `ToolError` 含 `anyhow::Error`），broadcast channel 改用 `Arc<AgentEvent>`；subscribe 返回 `Receiver<Arc<AgentEvent>>`
+- `llm-api-adapter` 拉取至 `/data/leiqiaojie2/llm-api-adapter`；`pi` 参考实现在 `/data/leiqiaojie2/pi`
 
 ---
 
