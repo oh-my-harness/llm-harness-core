@@ -31,7 +31,7 @@ pub struct Settings {
     pub default_provider: Option<String>,
     /// Default model ID.
     pub default_model: Option<String>,
-    /// Default thinking level ("off" | "low" | "medium" | "high").
+    /// Default thinking level ("off" | "minimal" | "low" | "medium" | "high" | "xhigh").
     pub default_thinking_level: Option<String>,
     /// Compaction behaviour.
     pub compaction: Option<CompactionSettings>,
@@ -41,6 +41,9 @@ pub struct Settings {
     pub max_tokens: Option<u32>,
     /// Custom session storage directory.
     pub session_dir: Option<String>,
+    /// Active tool names (e.g. ["read","bash","edit","write","grep"]).
+    /// When absent the default set is used.
+    pub active_tools: Option<Vec<String>>,
 }
 
 impl Settings {
@@ -60,6 +63,7 @@ impl Settings {
         take!(retry);
         take!(max_tokens);
         take!(session_dir);
+        take!(active_tools);
         self
     }
 }

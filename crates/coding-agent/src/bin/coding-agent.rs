@@ -57,6 +57,13 @@ async fn run() -> i32 {
                 .join("sessions")
         });
 
+    // ── --help / -h ───────────────────────────────────────────────────────────
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return 0;
+    }
+
     // ── --list-sessions: enumerate persisted sessions then exit ───────────────
 
     if args.iter().any(|a| a == "--list-sessions") {
@@ -160,6 +167,11 @@ async fn run() -> i32 {
         }
     }
 
+    // Wire active tools from settings.
+    if let Some(ref tools) = settings_mgr.settings().active_tools {
+        builder = builder.active_tools(tools.iter().cloned());
+    }
+
     let agent = match builder.build().await {
         Ok(a) => a,
         Err(e) => {
@@ -234,6 +246,42 @@ fn list_sessions(dir: &std::path::Path) -> i32 {
 }
 
 // ── Arg helpers ───────────────────────────────────────────────────────────────
+
+fn print_help() {
+    println!(
+        "\
+Usage: coding-agent [OPTIONS] [PROMPT]
+
+One-shot mode (default):
+  coding-agent -p \"your prompt\"
+  coding-agent \"your prompt\"
+  echo \"prompt\" | coding-agent
+
+Interactive REPL:
+  coding-agent --interactive
+  coding-agent -i
+
+Session management:
+  coding-agent --list-sessions
+  coding-agent --session-id <id> -p \"follow-up\"
+  coding-agent --name <label> -p \"start new named session\"
+  coding-agent --delete-session <id>
+
+Options:
+  -p, --print <PROMPT>       Prompt text (one-shot)
+  -i, --interactive          Start interactive REPL
+  --session-id <ID>          Resume an existing session
+  --name <LABEL>             Name the new session
+  --list-sessions            List all persisted sessions
+  --delete-session <ID>      Delete a persisted session
+  -h, --help                 Show this help
+
+Environment:
+  ANTHROPIC_API_KEY          Required API key
+  CODING_AGENT_MODEL         Override model ID
+  CODING_AGENT_SESSION_DIR   Override session storage directory"
+    );
+}
 
 fn delete_session(dir: &std::path::Path, id: &str) -> i32 {
     let session_path = dir.join(id);
@@ -366,6 +414,11 @@ async fn run_interactive(agent: &coding_agent::agent::CodingAgent) -> i32 {
     use rustyline::DefaultEditor;
     use rustyline::error::ReadlineError;
 
+    let history_path = dirs_next::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("coding-agent")
+        .join("history");
+
     let mut editor = match DefaultEditor::new() {
         Ok(e) => e,
         Err(e) => {
@@ -374,12 +427,18 @@ async fn run_interactive(agent: &coding_agent::agent::CodingAgent) -> i32 {
         }
     };
 
+    // Best-effort: load history; ignore errors if file doesn't exist yet.
+    if history_path.exists() {
+        let _ = editor.load_history(&history_path);
+    }
+
     loop {
         let line = match editor.readline("> ") {
             Ok(l) => l,
             Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => break,
             Err(e) => {
                 eprintln!("Error reading input: {e}");
+                let _ = save_history(&mut editor, &history_path);
                 return 1;
             }
         };
@@ -399,5 +458,17 @@ async fn run_interactive(agent: &coding_agent::agent::CodingAgent) -> i32 {
         }
     }
 
+    let _ = save_history(&mut editor, &history_path);
     0
+}
+
+fn save_history(
+    editor: &mut rustyline::DefaultEditor,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    editor.save_history(path)?;
+    Ok(())
 }
