@@ -172,6 +172,14 @@ async fn run() -> i32 {
         builder = builder.active_tools(tools.iter().cloned());
     }
 
+    // Wire skill_dirs and template_dirs from settings.
+    if let Some(ref dirs) = settings_mgr.settings().skill_dirs {
+        builder = builder.skill_dirs(dirs.iter().map(std::path::PathBuf::from));
+    }
+    if let Some(ref dirs) = settings_mgr.settings().template_dirs {
+        builder = builder.template_dirs(dirs.iter().map(std::path::PathBuf::from));
+    }
+
     let agent = match builder.build().await {
         Ok(a) => a,
         Err(e) => {
@@ -279,7 +287,14 @@ Options:
 Environment:
   ANTHROPIC_API_KEY          Required API key
   CODING_AGENT_MODEL         Override model ID
-  CODING_AGENT_SESSION_DIR   Override session storage directory"
+  CODING_AGENT_SESSION_DIR   Override session storage directory
+
+Settings (settings.json):
+  skill_dirs      Directories to load skill files from (array of paths)
+  template_dirs   Directories to load prompt template files from (array of paths)
+  active_tools    Active tool names (array, default: read, bash, edit, write)
+  default_model   Default model ID
+  session_dir     Default session storage directory"
     );
 }
 

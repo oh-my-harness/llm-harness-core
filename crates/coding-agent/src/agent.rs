@@ -4,6 +4,7 @@ use std::sync::Arc;
 use llm_harness::session::CreateSessionOptions;
 use llm_harness::{
     AgentHarness, AgentHarnessOptions, JsonlSessionRepo, OsEnv, Session, SessionRepo,
+    load_skills,
 };
 use llm_harness_loop::{LlmClient, RetryConfig};
 use llm_harness_types::{CompactionError, ExecutionEnv, HarnessError, ThinkingLevel, Tool};
@@ -77,6 +78,8 @@ pub struct CodingAgentBuilder {
     session_name: Option<String>,
     compaction_reserve_tokens: Option<u32>,
     compaction_keep_recent_tokens: Option<u32>,
+    skill_dirs: Vec<PathBuf>,
+    template_dirs: Vec<PathBuf>,
 }
 
 impl CodingAgentBuilder {
@@ -102,6 +105,8 @@ impl CodingAgentBuilder {
             session_name: None,
             compaction_reserve_tokens: None,
             compaction_keep_recent_tokens: None,
+            skill_dirs: vec![],
+            template_dirs: vec![],
         }
     }
 
@@ -223,6 +228,18 @@ impl CodingAgentBuilder {
         self
     }
 
+    /// Add directories to scan for skill files at startup.
+    pub fn skill_dirs(mut self, dirs: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
+        self.skill_dirs.extend(dirs.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add directories to scan for prompt template files at startup.
+    pub fn template_dirs(mut self, dirs: impl IntoIterator<Item = impl Into<PathBuf>>) -> Self {
+        self.template_dirs.extend(dirs.into_iter().map(Into::into));
+        self
+    }
+
     /// Build the `CodingAgent`.
     pub async fn build(self) -> Result<CodingAgent, BuildError> {
         let cwd = self
@@ -266,13 +283,20 @@ impl CodingAgentBuilder {
         };
         context_files.extend(self.extra_context_files);
 
+        // Load skills from configured dirs (needed both for system prompt and harness state).
+        let (skills, _skill_diags) = if !self.skill_dirs.is_empty() {
+            load_skills(env.as_ref(), &self.skill_dirs).await
+        } else {
+            (vec![], vec![])
+        };
+
         // Build system prompt.
         let tool_refs: Vec<&dyn Tool> = active_tools.iter().map(|t| t.as_ref()).collect();
         let system_prompt = build_system_prompt(&SystemPromptOptions {
             tools: &tool_refs,
             cwd: &cwd.to_string_lossy(),
             context_files: &context_files,
-            skills: &[],
+            skills: &skills,
             custom_prompt: self.custom_prompt.as_deref(),
             append: self.append_prompt.as_deref(),
             extra_guidelines: &self.extra_guidelines,
@@ -318,6 +342,13 @@ impl CodingAgentBuilder {
         } else {
             (AgentHarness::new_in_memory(client, env, opts).await, None)
         };
+
+        // Load skills and templates into harness state (enables harness.skill() invocations).
+        if !self.skill_dirs.is_empty() || !self.template_dirs.is_empty() {
+            let _ = harness
+                .reload_resources(self.skill_dirs, self.template_dirs)
+                .await;
+        }
 
         Ok(CodingAgent {
             harness,

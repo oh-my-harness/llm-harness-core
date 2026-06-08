@@ -44,6 +44,10 @@ pub struct Settings {
     /// Active tool names (e.g. ["read","bash","edit","write","grep"]).
     /// When absent the default set is used.
     pub active_tools: Option<Vec<String>>,
+    /// Directories to load skill files from (glob-expanded at startup).
+    pub skill_dirs: Option<Vec<String>>,
+    /// Directories to load prompt template files from.
+    pub template_dirs: Option<Vec<String>>,
 }
 
 impl Settings {
@@ -64,6 +68,8 @@ impl Settings {
         take!(max_tokens);
         take!(session_dir);
         take!(active_tools);
+        take!(skill_dirs);
+        take!(template_dirs);
         self
     }
 }
