@@ -1,10 +1,11 @@
-//! Print-mode CLI: send a prompt, print the final assistant response, exit.
+//! CLI for the coding agent.
 //!
 //! Usage:
-//!   coding-agent -p "your prompt"
-//!   coding-agent --session-id <id> -p "follow-up"
-//!   coding-agent --list-sessions
-//!   echo "your prompt" | coding-agent
+//!   coding-agent -p "your prompt"            # one-shot mode
+//!   coding-agent --interactive               # REPL / interactive mode
+//!   coding-agent --session-id <id> -p "..."  # resume session (one-shot)
+//!   coding-agent --list-sessions             # list persisted sessions
+//!   echo "prompt" | coding-agent             # pipe a prompt
 //!
 //! Env:
 //!   ANTHROPIC_API_KEY  – required Anthropic API key
@@ -14,9 +15,10 @@ use std::io::Read;
 use std::sync::Arc;
 
 use llm_adapter::anthropic::AnthropicProvider;
+use llm_harness::AgentHarnessEvent;
 use llm_harness::session::SessionMetadata;
 use llm_harness_loop::RetryConfig;
-use llm_harness_types::{AgentMessage, ContentBlock, ThinkingLevel};
+use llm_harness_types::{AgentEvent, AgentMessage, ContentBlock, HarnessPhase, ThinkingLevel};
 
 use coding_agent::agent::CodingAgent;
 use coding_agent::settings::{SettingsManager, default_config_dir};
@@ -61,13 +63,20 @@ async fn run() -> i32 {
         return list_sessions(&session_dir);
     }
 
-    // ── Resolve prompt text ────────────────────────────────────────────────────
+    // ── Detect mode: interactive vs one-shot ──────────────────────────────────
 
-    let prompt = match resolve_prompt(&args) {
-        Ok(p) => p,
-        Err(msg) => {
-            eprintln!("Error: {msg}");
-            return 1;
+    let interactive = args.iter().any(|a| a == "--interactive" || a == "-i")
+        || (atty::is(atty::Stream::Stdin) && resolve_prompt_opt(&args).is_none());
+
+    let prompt_opt = if interactive {
+        None
+    } else {
+        match resolve_prompt(&args) {
+            Ok(p) => Some(p),
+            Err(msg) => {
+                eprintln!("Error: {msg}");
+                return 1;
+            }
         }
     };
 
@@ -155,6 +164,11 @@ async fn run() -> i32 {
         eprintln!("session-id: {sid}");
     }
 
+    if interactive {
+        return run_interactive(&agent).await;
+    }
+
+    let prompt = prompt_opt.unwrap();
     if let Err(e) = agent.prompt(&prompt).await {
         eprintln!("Error: {e}");
         return 1;
@@ -252,10 +266,17 @@ fn list_sessions(dir: &std::path::Path) -> i32 {
 // ── Arg helpers ───────────────────────────────────────────────────────────────
 
 fn resolve_prompt(args: &[String]) -> Result<String, String> {
+    resolve_prompt_opt(args).ok_or_else(|| {
+        "No prompt provided. Use -p \"prompt\", pass text as argument, or pipe via stdin.".into()
+    })
+}
+
+/// Like `resolve_prompt` but returns `None` instead of an error when no prompt is found.
+fn resolve_prompt_opt(args: &[String]) -> Option<String> {
     // -p "prompt" or --print "prompt"
     for i in 0..args.len() {
         if (args[i] == "-p" || args[i] == "--print") && i + 1 < args.len() {
-            return Ok(args[i + 1].clone());
+            return Some(args[i + 1].clone());
         }
     }
 
@@ -271,23 +292,22 @@ fn resolve_prompt(args: &[String]) -> Result<String, String> {
             continue;
         }
         if !arg.starts_with('-') {
-            return Ok(arg.clone());
+            return Some(arg.clone());
         }
     }
 
-    // Stdin
+    // Stdin (non-TTY only)
     if !atty::is(atty::Stream::Stdin) {
         let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| format!("Failed to read stdin: {e}"))?;
-        let trimmed = buf.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
+        if std::io::stdin().read_to_string(&mut buf).is_ok() {
+            let trimmed = buf.trim().to_string();
+            if !trimmed.is_empty() {
+                return Some(trimmed);
+            }
         }
     }
 
-    Err("No prompt provided. Use -p \"prompt\", pass text as argument, or pipe via stdin.".into())
+    None
 }
 
 fn resolve_session_id(args: &[String]) -> Option<String> {
@@ -311,4 +331,75 @@ fn parse_thinking_level(s: &str) -> Option<ThinkingLevel> {
         "high" => Some(ThinkingLevel::High),
         _ => None,
     }
+}
+
+// ── Interactive REPL ──────────────────────────────────────────────────────────
+
+async fn run_interactive(agent: &coding_agent::agent::CodingAgent) -> i32 {
+    use rustyline::DefaultEditor;
+    use rustyline::error::ReadlineError;
+    use std::io::Write;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let mut editor = match DefaultEditor::new() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Failed to initialize line editor: {e}");
+            return 1;
+        }
+    };
+
+    loop {
+        let line = match editor.readline("> ") {
+            Ok(l) => l,
+            Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => break,
+            Err(e) => {
+                eprintln!("Error reading input: {e}");
+                return 1;
+            }
+        };
+
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "exit" || line == "quit" {
+            break;
+        }
+        let _ = editor.add_history_entry(&line);
+
+        // Subscribe before starting prompt so we don't miss any events.
+        let mut events = agent.harness().subscribe();
+
+        // Spawn a task to print streaming text deltas.
+        let printer = tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(ev) => match ev.as_ref() {
+                        AgentHarnessEvent::Agent(AgentEvent::TextDelta { text, .. }) => {
+                            print!("{text}");
+                            let _ = std::io::stdout().flush();
+                        }
+                        AgentHarnessEvent::PhaseChange {
+                            to: HarnessPhase::Idle,
+                            ..
+                        } => break,
+                        _ => {}
+                    },
+                    Err(RecvError::Closed) => break,
+                    Err(RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+
+        if let Err(e) = agent.prompt(&line).await {
+            eprintln!("\nError: {e}");
+            printer.abort();
+            return 1;
+        }
+        let _ = printer.await;
+        println!();
+    }
+
+    0
 }
