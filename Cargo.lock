@@ -127,6 +127,7 @@ dependencies = [
  "llm-harness-types",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-util",
 ]

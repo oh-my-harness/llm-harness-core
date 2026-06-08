@@ -6,12 +6,14 @@ license.workspace = true
 
 [dependencies]
 llm-harness-types = { workspace = true }
+llm-harness-loop  = { workspace = true }
 llm-harness        = { path = "../llm-harness" }
 serde_json         = { workspace = true }
 futures            = { workspace = true }
 tokio              = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 chrono             = { workspace = true }
+thiserror          = { workspace = true }
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["full", "test-util"] }
