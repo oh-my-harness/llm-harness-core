@@ -75,6 +75,8 @@ pub struct CodingAgentBuilder {
     custom_prompt: Option<String>,
     append_prompt: Option<String>,
     session_name: Option<String>,
+    compaction_reserve_tokens: Option<u32>,
+    compaction_keep_recent_tokens: Option<u32>,
 }
 
 impl CodingAgentBuilder {
@@ -98,6 +100,8 @@ impl CodingAgentBuilder {
             custom_prompt: None,
             append_prompt: None,
             session_name: None,
+            compaction_reserve_tokens: None,
+            compaction_keep_recent_tokens: None,
         }
     }
 
@@ -207,6 +211,18 @@ impl CodingAgentBuilder {
         self
     }
 
+    /// Override the token budget reserved for the LLM response during compaction.
+    pub fn compaction_reserve_tokens(mut self, n: u32) -> Self {
+        self.compaction_reserve_tokens = Some(n);
+        self
+    }
+
+    /// Override the number of recent context tokens always preserved during compaction.
+    pub fn compaction_keep_recent_tokens(mut self, n: u32) -> Self {
+        self.compaction_keep_recent_tokens = Some(n);
+        self
+    }
+
     /// Build the `CodingAgent`.
     pub async fn build(self) -> Result<CodingAgent, BuildError> {
         let cwd = self
@@ -269,6 +285,8 @@ impl CodingAgentBuilder {
             self.max_tokens,
             self.thinking_level,
             self.retry,
+            self.compaction_reserve_tokens,
+            self.compaction_keep_recent_tokens,
         );
 
         let (harness, session_id) = if let Some(session_dir) = self.session_dir {
@@ -316,6 +334,8 @@ fn build_opts(
     max_tokens: Option<u32>,
     thinking_level: Option<ThinkingLevel>,
     retry: Option<RetryConfig>,
+    compaction_reserve_tokens: Option<u32>,
+    compaction_keep_recent_tokens: Option<u32>,
 ) -> AgentHarnessOptions {
     let mut opts = AgentHarnessOptions::new(model);
     opts.tools = tools;
@@ -327,6 +347,8 @@ fn build_opts(
         opts.thinking_level = tl;
     }
     opts.retry = retry;
+    opts.compaction_reserve_tokens = compaction_reserve_tokens;
+    opts.compaction_keep_recent_tokens = compaction_keep_recent_tokens;
     opts
 }
 

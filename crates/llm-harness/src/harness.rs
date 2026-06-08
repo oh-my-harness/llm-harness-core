@@ -209,6 +209,8 @@ struct HarnessInner {
     queue_capacity: usize,
     max_tokens: u32,
     retry: Option<RetryConfig>,
+    compaction_reserve_tokens: Option<u32>,
+    compaction_keep_recent_tokens: Option<u32>,
 }
 
 impl HarnessInner {
@@ -254,6 +256,10 @@ pub struct AgentHarnessOptions {
     pub templates: Vec<PromptTemplate>,
     /// Retry config for transient provider errors; `None` disables retry.
     pub retry: Option<RetryConfig>,
+    /// Override tokens to reserve for the LLM response during compaction.
+    pub compaction_reserve_tokens: Option<u32>,
+    /// Override how many recent context tokens to always preserve during compaction.
+    pub compaction_keep_recent_tokens: Option<u32>,
 }
 
 impl AgentHarnessOptions {
@@ -280,6 +286,8 @@ impl AgentHarnessOptions {
             skills: vec![],
             templates: vec![],
             retry: None,
+            compaction_reserve_tokens: None,
+            compaction_keep_recent_tokens: None,
         }
     }
 }
@@ -426,6 +434,8 @@ impl AgentHarness {
             queue_capacity: cap,
             max_tokens: opts.max_tokens,
             retry: opts.retry,
+            compaction_reserve_tokens: opts.compaction_reserve_tokens,
+            compaction_keep_recent_tokens: opts.compaction_keep_recent_tokens,
         };
 
         let convert_to_llm: Arc<dyn ConvertToLlmHook> = opts
@@ -1263,12 +1273,14 @@ impl AgentHarness {
             }
         }
 
-        let (model_info, model, max_tokens) = {
+        let (model_info, model, max_tokens, reserve_tokens, keep_recent_tokens) = {
             let inner = self.inner.lock().unwrap();
             (
                 inner.state.model_info.clone(),
                 inner.state.model.clone(),
                 inner.max_tokens,
+                inner.compaction_reserve_tokens,
+                inner.compaction_keep_recent_tokens,
             )
         };
 
@@ -1279,8 +1291,8 @@ impl AgentHarness {
 
         let settings = CompactionSettings {
             enabled: true,
-            reserve_tokens: 16_384,
-            keep_recent_tokens: 20_000,
+            reserve_tokens: reserve_tokens.unwrap_or(16_384) as usize,
+            keep_recent_tokens: keep_recent_tokens.unwrap_or(20_000) as usize,
             summary_model: model.clone(),
             summary_model_info: m_info.clone(),
         };

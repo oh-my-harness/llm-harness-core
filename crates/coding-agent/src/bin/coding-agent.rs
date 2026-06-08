@@ -18,7 +18,7 @@ use llm_adapter::anthropic::AnthropicProvider;
 use llm_harness::AgentHarnessEvent;
 use llm_harness::session::SessionMetadata;
 use llm_harness_loop::RetryConfig;
-use llm_harness_types::{AgentEvent, AgentMessage, ContentBlock, HarnessPhase, ThinkingLevel};
+use llm_harness_types::{AgentEvent, HarnessPhase, ThinkingLevel};
 
 use coding_agent::agent::CodingAgent;
 use coding_agent::settings::{SettingsManager, default_config_dir};
@@ -61,6 +61,12 @@ async fn run() -> i32 {
 
     if args.iter().any(|a| a == "--list-sessions") {
         return list_sessions(&session_dir);
+    }
+
+    // ── --delete-session <id>: remove a persisted session then exit ───────────
+
+    if let Some(del_id) = resolve_flag_value(&args, "--delete-session") {
+        return delete_session(&session_dir, &del_id);
     }
 
     // ── Detect mode: interactive vs one-shot ──────────────────────────────────
@@ -131,13 +137,16 @@ async fn run() -> i32 {
     }
 
     // Wire auto-compaction: disabled only when settings explicitly set enabled = false.
-    if let Some(false) = settings_mgr
-        .settings()
-        .compaction
-        .as_ref()
-        .and_then(|c| c.enabled)
-    {
-        builder = builder.auto_compact(false);
+    if let Some(cs) = settings_mgr.settings().compaction.as_ref() {
+        if cs.enabled == Some(false) {
+            builder = builder.auto_compact(false);
+        }
+        if let Some(rt) = cs.reserve_tokens {
+            builder = builder.compaction_reserve_tokens(rt);
+        }
+        if let Some(kr) = cs.keep_recent_tokens {
+            builder = builder.compaction_keep_recent_tokens(kr);
+        }
     }
 
     // Wire retry from settings.
@@ -169,51 +178,12 @@ async fn run() -> i32 {
     }
 
     let prompt = prompt_opt.unwrap();
-    if let Err(e) = agent.prompt(&prompt).await {
+    if let Err(e) = stream_prompt(&agent, &prompt).await {
         eprintln!("Error: {e}");
         return 1;
     }
 
-    // ── Extract and print the last assistant response ──────────────────────────
-
-    let context = match agent.harness().build_context().await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error reading session: {e}");
-            return 1;
-        }
-    };
-
-    let last_text = context.messages.iter().rev().find_map(|m| {
-        if let AgentMessage::Assistant(am) = m {
-            let text: String = am
-                .content
-                .iter()
-                .filter_map(|b| {
-                    if let ContentBlock::Text { text } = b {
-                        Some(text.as_str())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            if !text.is_empty() { Some(text) } else { None }
-        } else {
-            None
-        }
-    });
-
-    match last_text {
-        Some(text) => {
-            println!("{text}");
-            0
-        }
-        None => {
-            eprintln!("No response received");
-            1
-        }
-    }
+    0
 }
 
 // ── Subcommand: --list-sessions ───────────────────────────────────────────────
@@ -265,6 +235,24 @@ fn list_sessions(dir: &std::path::Path) -> i32 {
 
 // ── Arg helpers ───────────────────────────────────────────────────────────────
 
+fn delete_session(dir: &std::path::Path, id: &str) -> i32 {
+    let session_path = dir.join(id);
+    if !session_path.exists() {
+        eprintln!("Session not found: {id}");
+        return 1;
+    }
+    match std::fs::remove_dir_all(&session_path) {
+        Ok(()) => {
+            println!("Deleted session: {id}");
+            0
+        }
+        Err(e) => {
+            eprintln!("Error deleting session {id}: {e}");
+            1
+        }
+    }
+}
+
 fn resolve_prompt(args: &[String]) -> Result<String, String> {
     resolve_prompt_opt(args).ok_or_else(|| {
         "No prompt provided. Use -p \"prompt\", pass text as argument, or pipe via stdin.".into()
@@ -287,7 +275,7 @@ fn resolve_prompt_opt(args: &[String]) -> Option<String> {
             skip_next = false;
             continue;
         }
-        if arg == "--session-id" || arg == "--name" {
+        if arg == "--session-id" || arg == "--name" || arg == "--delete-session" {
             skip_next = true;
             continue;
         }
@@ -333,13 +321,48 @@ fn parse_thinking_level(s: &str) -> Option<ThinkingLevel> {
     }
 }
 
+// ── Streaming helpers ─────────────────────────────────────────────────────────
+
+/// Send a prompt and stream text deltas to stdout; prints a trailing newline.
+async fn stream_prompt(
+    agent: &coding_agent::agent::CodingAgent,
+    prompt: &str,
+) -> Result<(), llm_harness_types::HarnessError> {
+    use std::io::Write;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let mut events = agent.harness().subscribe();
+    let printer = tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(ev) => match ev.as_ref() {
+                    AgentHarnessEvent::Agent(AgentEvent::TextDelta { text, .. }) => {
+                        print!("{text}");
+                        let _ = std::io::stdout().flush();
+                    }
+                    AgentHarnessEvent::PhaseChange {
+                        to: HarnessPhase::Idle,
+                        ..
+                    } => break,
+                    _ => {}
+                },
+                Err(RecvError::Closed) => break,
+                Err(RecvError::Lagged(_)) => continue,
+            }
+        }
+    });
+
+    let result = agent.prompt(prompt).await;
+    let _ = printer.await;
+    println!();
+    result
+}
+
 // ── Interactive REPL ──────────────────────────────────────────────────────────
 
 async fn run_interactive(agent: &coding_agent::agent::CodingAgent) -> i32 {
     use rustyline::DefaultEditor;
     use rustyline::error::ReadlineError;
-    use std::io::Write;
-    use tokio::sync::broadcast::error::RecvError;
 
     let mut editor = match DefaultEditor::new() {
         Ok(e) => e,
@@ -368,37 +391,10 @@ async fn run_interactive(agent: &coding_agent::agent::CodingAgent) -> i32 {
         }
         let _ = editor.add_history_entry(&line);
 
-        // Subscribe before starting prompt so we don't miss any events.
-        let mut events = agent.harness().subscribe();
-
-        // Spawn a task to print streaming text deltas.
-        let printer = tokio::spawn(async move {
-            loop {
-                match events.recv().await {
-                    Ok(ev) => match ev.as_ref() {
-                        AgentHarnessEvent::Agent(AgentEvent::TextDelta { text, .. }) => {
-                            print!("{text}");
-                            let _ = std::io::stdout().flush();
-                        }
-                        AgentHarnessEvent::PhaseChange {
-                            to: HarnessPhase::Idle,
-                            ..
-                        } => break,
-                        _ => {}
-                    },
-                    Err(RecvError::Closed) => break,
-                    Err(RecvError::Lagged(_)) => continue,
-                }
-            }
-        });
-
-        if let Err(e) = agent.prompt(&line).await {
+        if let Err(e) = stream_prompt(agent, &line).await {
             eprintln!("\nError: {e}");
-            printer.abort();
             return 1;
         }
-        let _ = printer.await;
-        println!();
     }
 
     0
