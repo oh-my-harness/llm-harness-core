@@ -115,6 +115,16 @@ async fn run() -> i32 {
         builder = builder.thinking_level(level);
     }
 
+    // Wire auto-compaction: disabled only when settings explicitly set enabled = false.
+    if let Some(false) = settings_mgr
+        .settings()
+        .compaction
+        .as_ref()
+        .and_then(|c| c.enabled)
+    {
+        builder = builder.auto_compact(false);
+    }
+
     let agent = match builder.build().await {
         Ok(a) => a,
         Err(e) => {

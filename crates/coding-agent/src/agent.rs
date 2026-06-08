@@ -6,7 +6,7 @@ use llm_harness::{
     AgentHarness, AgentHarnessOptions, JsonlSessionRepo, OsEnv, Session, SessionRepo,
 };
 use llm_harness_loop::LlmClient;
-use llm_harness_types::{ExecutionEnv, HarnessError, ThinkingLevel, Tool};
+use llm_harness_types::{CompactionError, ExecutionEnv, HarnessError, ThinkingLevel, Tool};
 
 use crate::prompt::{ContextFile, SystemPromptOptions, build_system_prompt};
 use crate::tools::{ALL_TOOL_NAMES, DEFAULT_TOOL_NAMES, create_all_tools};
@@ -16,6 +16,8 @@ pub struct CodingAgent {
     harness: AgentHarness,
     /// Session ID when backed by a JSONL session; `None` for in-memory sessions.
     session_id: Option<String>,
+    /// Whether to run compaction after each prompt when context is near capacity.
+    auto_compact: bool,
 }
 
 impl CodingAgent {
@@ -25,9 +27,18 @@ impl CodingAgent {
     }
 
     /// Send a prompt and wait for the run to complete.
+    ///
+    /// When `auto_compact` is enabled (the default), compaction is attempted
+    /// after each run; `InsufficientTokens` is silently ignored.
     pub async fn prompt(&self, text: &str) -> Result<(), HarnessError> {
         self.harness.prompt(text).await?;
         self.harness.wait_for_idle().await;
+        if self.auto_compact {
+            match self.harness.compact().await {
+                Ok(_) | Err(HarnessError::Compaction(CompactionError::InsufficientTokens)) => {}
+                Err(e) => return Err(e),
+            }
+        }
         Ok(())
     }
 
@@ -56,6 +67,7 @@ pub struct CodingAgentBuilder {
     resume_session_id: Option<String>,
     max_tokens: Option<u32>,
     thinking_level: Option<ThinkingLevel>,
+    auto_compact: bool,
     load_context: bool,
     extra_context_files: Vec<ContextFile>,
     extra_guidelines: Vec<String>,
@@ -76,6 +88,7 @@ impl CodingAgentBuilder {
             resume_session_id: None,
             max_tokens: None,
             thinking_level: None,
+            auto_compact: true,
             load_context: true,
             extra_context_files: vec![],
             extra_guidelines: vec![],
@@ -123,6 +136,12 @@ impl CodingAgentBuilder {
     /// Set the reasoning depth level (default: Off).
     pub fn thinking_level(mut self, level: ThinkingLevel) -> Self {
         self.thinking_level = Some(level);
+        self
+    }
+
+    /// Enable or disable auto-compaction after each prompt (default: enabled).
+    pub fn auto_compact(mut self, enabled: bool) -> Self {
+        self.auto_compact = enabled;
         self
     }
 
@@ -264,6 +283,7 @@ impl CodingAgentBuilder {
         Ok(CodingAgent {
             harness,
             session_id,
+            auto_compact: self.auto_compact,
         })
     }
 }
