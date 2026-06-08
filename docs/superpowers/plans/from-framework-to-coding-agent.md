@@ -16,7 +16,7 @@
 
 ## 一、当前状态
 
-### ✅ 已完成（~5500 行 Rust）
+### ✅ 已完成（~7000 行 Rust）
 
 | 阶段 | Crate | 内容 |
 |---|---|---|
@@ -26,19 +26,22 @@
 | **Phase 4** | `llm-harness` | `SessionEntry`/`SessionEntryPayload`（11 种变体）、`SessionStorage` trait、`InMemorySessionStorage`、`SessionRepo` trait、`InMemorySessionRepo`、`JsonlSessionStorage`、`JsonlSessionRepo`、`Session`（`build_context`/`append`/`navigate_to`/`fork_branch`/`list_branches`）；10 个测试通过 |
 | **Phase 5** | `llm-harness` | `CompactionSettings`、`CompactionPreparation`、`prepare_compaction`（纯函数，token 估算 + cut point 决策）、`compact`（async LLM 调用生成摘要）；`CompactionResult`/`FileOperation`/`FileOpKind` 升级为完整版；6 个测试通过 |
 | **Phase 6** | `llm-harness` | `Skill`/`SkillDiagnostic`/`SourcedSkill`/`PromptTemplate`、`load_skills`/`load_sourced_skills`/`load_prompt_templates`（`OsEnv` 真实 fs）、`format_skills_for_system_prompt`/`format_skill_invocation`、`invoke_template`（位置参数展开）、`parse_command_args`（shell 引号解析）；`OsEnv` 完整 `ExecutionEnv` 实现；20 个测试通过 |
+| **Phase 7** | `llm-harness` | `AgentHarness` + `HarnessState` + `HarnessHooks`（11 个 hook）+ `AgentHarnessEvent`（20 个变体）；全部方法（`prompt`/`compact`/`reload_resources`/`skill`/`prompt_from_template`/`set_model`/`set_tools`/`set_active_tools`/分支操作/队列操作/观测）；`DefaultPrepareNextTurn`（active_tools 跨 turn 传播）；pending_session_writes 机制（turn 结束批量落盘）；12 个测试通过 |
 
 ### ❌ 未完成
 
-**框架层**（spec 中有设计，但无实现）：
-- Phase 7: AgentHarness
+**框架层**：全部完成 ✅
 
 **应用层**（coding-agent，spec 中未覆盖）：
-- 全部 15 个模块（下文第二部分详述）
 
 ### 📝 实现备注
 
 - `AgentEvent` 未实现 `Clone`（因 `ToolError` 含 `anyhow::Error`），broadcast channel 改用 `Arc<AgentEvent>`；subscribe 返回 `Receiver<Arc<AgentEvent>>`
+- `AgentHarnessEvent` 同样不实现 `Clone`（因包含 `AgentEvent`），broadcast channel 用 `Arc<AgentHarnessEvent>`
+- `AgentHarness::skills()` / `templates()` 返回 `Vec`（克隆），而非 spec 中的 `&[...]` 引用（需要 Mutex 内部可变性，无法在 safe Rust 中直接返回引用）
+- `agent_loop` 发出的 `AgentStart::initial_messages` 为空，`AgentHarness` 在启动 loop 前将 initial 消息直接推入 `pending_session_writes`
 - `llm-api-adapter` 拉取至 `/data/leiqiaojie2/llm-api-adapter`；`pi` 参考实现在 `/data/leiqiaojie2/pi`
+- **推送状态：** Phase 5+6 提交（988bd01）和 Phase 7 提交（dda8412）均在本地，因网络限制无法推送到 GitHub
 
 ---
 
