@@ -104,7 +104,7 @@ impl SessionRepo for InMemorySessionRepo {
                 .sessions
                 .get(&id)
                 .cloned()
-                .ok_or_else(|| SessionError::SessionNotFound(id))
+                .ok_or(SessionError::SessionNotFound(id))
         })
     }
 
@@ -125,11 +125,10 @@ impl SessionRepo for InMemorySessionRepo {
             let mut metas: Vec<SessionMetadata> = Vec::new();
             for s in sessions {
                 let m = s.metadata().await?;
-                if let Some(ref needle) = opts.name_contains {
-                    if !m.name.as_deref().unwrap_or("").contains(needle.as_str()) {
+                if let Some(ref needle) = opts.name_contains
+                    && !m.name.as_deref().unwrap_or("").contains(needle.as_str()) {
                         continue;
                     }
-                }
                 metas.push(m);
             }
 
@@ -242,7 +241,7 @@ impl SessionRepo for InMemorySessionRepo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{session::Session, types::SessionEntryPayload};
+    use crate::session::session::Session;
     use llm_harness_types::*;
 
     fn user_msg(text: &str) -> AgentMessage {

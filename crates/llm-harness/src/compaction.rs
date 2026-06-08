@@ -232,12 +232,7 @@ pub fn prepare_compaction(
 /// Returns `None` if no valid boundary exists in the range.
 fn find_valid_cut_boundary(entries: &[SessionEntry], cut_relative: usize) -> Option<usize> {
     // Scan backward from cut_relative (inclusive) to find a UserMessage.
-    for i in (0..=cut_relative.min(entries.len().saturating_sub(1))).rev() {
-        if is_valid_cut_start(&entries[i]) {
-            return Some(i);
-        }
-    }
-    None
+    (0..=cut_relative.min(entries.len().saturating_sub(1))).rev().find(|&i| is_valid_cut_start(&entries[i]))
 }
 
 fn is_valid_cut_start(entry: &SessionEntry) -> bool {

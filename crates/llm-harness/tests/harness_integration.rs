@@ -366,10 +366,7 @@ async fn compaction_via_hook_override_inserts_summary() {
             Some(AgentMessage::CompactionSummary(_))
         ),
         "expected summary as first message; got {:?}",
-        ctx_after
-            .messages
-            .first()
-            .map(std::mem::discriminant)
+        ctx_after.messages.first().map(std::mem::discriminant)
     );
 }
 

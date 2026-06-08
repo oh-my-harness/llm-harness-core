@@ -7,7 +7,7 @@ use llm_harness_types::{EntryId, SessionError};
 use tokio::sync::Mutex;
 
 use super::repo::SessionRepo;
-use super::storage::{InMemorySessionStorage, SessionStorage};
+use super::storage::SessionStorage;
 use super::types::*;
 
 // ── JsonlSessionStorage ────────────────────────────────────────────────────────
@@ -252,11 +252,10 @@ impl SessionStorage for JsonlSessionStorage {
             let mut inner = self.inner.lock().await;
             Self::ensure_loaded(&mut inner).await?;
             for entry in inner.entry_map.values() {
-                if let SessionEntryPayload::Label { name } = &entry.payload {
-                    if entry.parent_id == Some(id) {
+                if let SessionEntryPayload::Label { name } = &entry.payload
+                    && entry.parent_id == Some(id) {
                         return Ok(Some(name.clone()));
                     }
-                }
             }
             Ok(None)
         })
@@ -400,11 +399,10 @@ impl SessionRepo for JsonlSessionRepo {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
-                if let Some(ref needle) = opts.name_contains {
-                    if !meta.name.as_deref().unwrap_or("").contains(needle.as_str()) {
+                if let Some(ref needle) = opts.name_contains
+                    && !meta.name.as_deref().unwrap_or("").contains(needle.as_str()) {
                         continue;
                     }
-                }
                 metas.push(meta);
             }
             metas.sort_by(|a, b| match opts.order {

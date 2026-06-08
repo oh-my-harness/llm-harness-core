@@ -86,8 +86,8 @@ impl Session {
     pub async fn navigate_to(&self, target: EntryId) -> Result<(), SessionError> {
         let current = self.storage.active_cursor().await?;
         // Only write a BranchSwitch entry if we're actually moving to a different location.
-        if let Some(from) = current {
-            if from != target {
+        if let Some(from) = current
+            && from != target {
                 let switch_id = self.storage.create_entry_id();
                 let entry = SessionEntry {
                     id: switch_id,
@@ -101,7 +101,6 @@ impl Session {
                 };
                 self.storage.append_entry(entry).await?;
             }
-        }
         self.storage.set_active_cursor(target).await
     }
 
@@ -141,11 +140,10 @@ impl Session {
             let label = self.storage.label_at(leaf_id).await?;
             // Find BranchSummary entry referencing this leaf.
             let summary = path.iter().rev().find_map(|e| {
-                if let SessionEntryPayload::BranchSummary(bs) = &e.payload {
-                    if bs.leaf_id == leaf_id {
+                if let SessionEntryPayload::BranchSummary(bs) = &e.payload
+                    && bs.leaf_id == leaf_id {
                         return Some(bs.summary.clone());
                     }
-                }
                 None
             });
             branches.push(BranchInfo {
@@ -235,7 +233,7 @@ pub fn build_context_from_entries(entries: &[SessionEntry]) -> BuiltContext {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    
 
     use llm_harness_types::*;
 

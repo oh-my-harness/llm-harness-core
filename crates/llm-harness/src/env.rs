@@ -100,7 +100,7 @@ impl ExecutionEnv for OsEnv {
         Box::pin(async move {
             tokio::select! {
                 result = tokio::fs::write(&path, &content) => {
-                    result.map_err(|e| EnvError::Io(e))
+                    result.map_err(EnvError::Io)
                 }
                 _ = abort.cancelled() => Err(EnvError::Aborted),
             }
@@ -124,8 +124,8 @@ impl ExecutionEnv for OsEnv {
                         .append(true)
                         .open(&path)
                         .await
-                        .map_err(|e| EnvError::Io(e))?;
-                    file.write_all(&content).await.map_err(|e| EnvError::Io(e))
+                        .map_err(EnvError::Io)?;
+                    file.write_all(&content).await.map_err(EnvError::Io)
                 } => result,
                 _ = abort.cancelled() => Err(EnvError::Aborted),
             }
@@ -147,7 +147,7 @@ impl ExecutionEnv for OsEnv {
                     })?;
                     let modified = meta
                         .modified()
-                        .map(|t| DateTime::from(t))
+                        .map(DateTime::from)
                         .unwrap_or_else(|_| Utc::now());
                     Ok(FileInfo {
                         path,
@@ -175,11 +175,11 @@ impl ExecutionEnv for OsEnv {
                         _ => EnvError::Io(e),
                     })?;
                     let mut entries = Vec::new();
-                    while let Some(entry) = read_dir.next_entry().await.map_err(|e| EnvError::Io(e))? {
+                    while let Some(entry) = read_dir.next_entry().await.map_err(EnvError::Io)? {
                         if let Ok(meta) = entry.metadata().await {
                             let modified = meta
                                 .modified()
-                                .map(|t| DateTime::from(t))
+                                .map(DateTime::from)
                                 .unwrap_or_else(|_| Utc::now());
                             entries.push(FileInfo {
                                 path: entry.path(),
@@ -227,7 +227,7 @@ impl ExecutionEnv for OsEnv {
                     } else {
                         tokio::fs::create_dir(&path).await
                     }
-                } => result.map_err(|e| EnvError::Io(e)),
+                } => result.map_err(EnvError::Io),
                 _ = abort.cancelled() => Err(EnvError::Aborted),
             }
         })
@@ -253,7 +253,7 @@ impl ExecutionEnv for OsEnv {
                             Err(_) => tokio::fs::remove_dir(&path).await,
                         }
                     }
-                } => result.map_err(|e| EnvError::Io(e)),
+                } => result.map_err(EnvError::Io),
                 _ = abort.cancelled() => Err(EnvError::Aborted),
             }
         })
@@ -295,7 +295,7 @@ impl ExecutionEnv for OsEnv {
                 for (k, v) in &env_vars {
                     command.env(k, v);
                 }
-                let output = command.output().await.map_err(|e| EnvError::Io(e))?;
+                let output = command.output().await.map_err(EnvError::Io)?;
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let exit_code = output.status.code().unwrap_or(-1);

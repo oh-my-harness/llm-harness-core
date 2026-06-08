@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::{Path, PathBuf}};
 
 use llm_harness_types::*;
 use tokio_util::sync::CancellationToken;
@@ -195,7 +195,7 @@ pub async fn load_sourced_skills(
     (skills, diags)
 }
 
-fn parse_skill_file(source: &PathBuf, content: &str, dir: &PathBuf) -> Result<Skill, String> {
+fn parse_skill_file(source: &Path, content: &str, dir: &Path) -> Result<Skill, String> {
     let (fields, body) = parse_frontmatter(content);
 
     // Derive the name: frontmatter > parent directory name.
@@ -238,7 +238,7 @@ fn parse_skill_file(source: &PathBuf, content: &str, dir: &PathBuf) -> Result<Sk
         label,
         description,
         content: body.to_string(),
-        source: source.clone(),
+        source: source.to_path_buf(),
         disable_model_invocation,
     })
 }

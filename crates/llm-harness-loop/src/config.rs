@@ -1,10 +1,65 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use llm_adapter::LlmError;
 use llm_harness_types::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::convert::ConvertToLlmHook;
+
+// ── RetryConfig ───────────────────────────────────────────────────────────────
+
+/// Retry configuration for transient LLM provider errors.
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts (not counting the original).
+    pub max_retries: u32,
+    /// Base delay in ms for exponential backoff (doubles each attempt).
+    pub base_delay_ms: u64,
+}
+
+impl RetryConfig {
+    pub fn new(max_retries: u32, base_delay_ms: u64) -> Self {
+        Self {
+            max_retries,
+            base_delay_ms,
+        }
+    }
+
+    pub(crate) fn can_retry(&self, attempt: u32) -> bool {
+        attempt < self.max_retries
+    }
+
+    pub(crate) fn delay_for(&self, attempt: u32, e: &LlmError) -> Duration {
+        let hint = match e {
+            LlmError::RateLimit { retry_after } | LlmError::Overloaded { retry_after } => {
+                *retry_after
+            }
+            _ => None,
+        };
+        hint.unwrap_or_else(|| {
+            Duration::from_millis(self.base_delay_ms.saturating_mul(1u64 << attempt.min(10)))
+        })
+    }
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            base_delay_ms: 2_000,
+        }
+    }
+}
+
+/// Returns `true` for errors that are safe to retry (server-side transient).
+pub(crate) fn is_retryable(e: &LlmError) -> bool {
+    matches!(
+        e,
+        LlmError::RateLimit { .. } | LlmError::Overloaded { .. } | LlmError::Timeout
+    )
+}
 
 /// Agent loop 的配置。`agent_loop` 会消费此结构（所有权转移）。
 pub struct LoopConfig {
@@ -57,15 +112,23 @@ pub struct LoopConfig {
     pub steer_rx: Option<mpsc::Receiver<AgentMessage>>,
     /// loop 自然停止后逐个处理的后续消息。
     pub follow_up_rx: Option<mpsc::Receiver<AgentMessage>>,
+
+    // === Retry ===
+    /// Retry config for transient provider errors; `None` disables retry.
+    pub retry: Option<RetryConfig>,
 }
 
 #[cfg(test)]
 mod tests {
-
     #[test]
     #[cfg(feature = "test-utils")]
     fn loop_config_compiles() {
+        use std::sync::Arc;
+        use crate::convert::DefaultConvertToLlm;
         use crate::test_utils::NoOpEnv;
+        use crate::LoopConfig;
+        use llm_harness_types::{StreamOptions, ThinkingLevel, ToolExecutionMode};
+        use tokio_util::sync::CancellationToken;
         let _cfg = LoopConfig {
             model: "test-model".into(),
             max_tokens: 1024,
@@ -85,6 +148,7 @@ mod tests {
             auth: None,
             steer_rx: None,
             follow_up_rx: None,
+            retry: None,
         };
     }
 }

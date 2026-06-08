@@ -1,3 +1,4 @@
+#![allow(clippy::module_inception)]
 pub mod jsonl;
 pub mod repo;
 pub mod session;

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use llm_adapter::anthropic::AnthropicProvider;
 use llm_harness::session::SessionMetadata;
+use llm_harness_loop::RetryConfig;
 use llm_harness_types::{AgentMessage, ContentBlock, ThinkingLevel};
 
 use coding_agent::agent::CodingAgent;
@@ -123,6 +124,17 @@ async fn run() -> i32 {
         .and_then(|c| c.enabled)
     {
         builder = builder.auto_compact(false);
+    }
+
+    // Wire retry from settings.
+    if let Some(ref rs) = settings_mgr.settings().retry {
+        if rs.enabled == Some(false) {
+            builder = builder.retry(None);
+        } else {
+            let max_retries = rs.max_retries.unwrap_or(3);
+            let base_delay_ms = rs.base_delay_ms.unwrap_or(2_000);
+            builder = builder.retry(Some(RetryConfig::new(max_retries, base_delay_ms)));
+        }
     }
 
     let agent = match builder.build().await {

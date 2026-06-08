@@ -405,6 +405,7 @@ impl Agent {
                 auth: None,
                 steer_rx: Some(steer_rx),
                 follow_up_rx: Some(follow_up_rx),
+                retry: None,
             };
             (ctx, config)
         };

@@ -216,11 +216,10 @@ impl SessionStorage for InMemorySessionStorage {
             // Find a Label entry whose `from` target matches `id`.
             // For simplicity we scan all entries (acceptable for in-memory).
             for entry in st.entries.values() {
-                if let SessionEntryPayload::Label { name } = &entry.payload {
-                    if entry.parent_id == Some(id) {
+                if let SessionEntryPayload::Label { name } = &entry.payload
+                    && entry.parent_id == Some(id) {
                         return Ok(Some(name.clone()));
                     }
-                }
             }
             Ok(None)
         })

@@ -5,7 +5,7 @@ use llm_harness::session::CreateSessionOptions;
 use llm_harness::{
     AgentHarness, AgentHarnessOptions, JsonlSessionRepo, OsEnv, Session, SessionRepo,
 };
-use llm_harness_loop::LlmClient;
+use llm_harness_loop::{LlmClient, RetryConfig};
 use llm_harness_types::{CompactionError, ExecutionEnv, HarnessError, ThinkingLevel, Tool};
 
 use crate::prompt::{ContextFile, SystemPromptOptions, build_system_prompt};
@@ -68,6 +68,7 @@ pub struct CodingAgentBuilder {
     max_tokens: Option<u32>,
     thinking_level: Option<ThinkingLevel>,
     auto_compact: bool,
+    retry: Option<RetryConfig>,
     load_context: bool,
     extra_context_files: Vec<ContextFile>,
     extra_guidelines: Vec<String>,
@@ -89,6 +90,7 @@ impl CodingAgentBuilder {
             max_tokens: None,
             thinking_level: None,
             auto_compact: true,
+            retry: Some(RetryConfig::default()),
             load_context: true,
             extra_context_files: vec![],
             extra_guidelines: vec![],
@@ -142,6 +144,13 @@ impl CodingAgentBuilder {
     /// Enable or disable auto-compaction after each prompt (default: enabled).
     pub fn auto_compact(mut self, enabled: bool) -> Self {
         self.auto_compact = enabled;
+        self
+    }
+
+    /// Configure retry on transient provider errors (default: 3 retries, 2s base delay).
+    /// Pass `None` to disable retry entirely.
+    pub fn retry(mut self, config: Option<RetryConfig>) -> Self {
+        self.retry = config;
         self
     }
 
@@ -251,6 +260,7 @@ impl CodingAgentBuilder {
             system_prompt,
             self.max_tokens,
             self.thinking_level,
+            self.retry,
         );
 
         let (harness, session_id) = if let Some(session_dir) = self.session_dir {
@@ -294,6 +304,7 @@ fn build_opts(
     system_prompt: String,
     max_tokens: Option<u32>,
     thinking_level: Option<ThinkingLevel>,
+    retry: Option<RetryConfig>,
 ) -> AgentHarnessOptions {
     let mut opts = AgentHarnessOptions::new(model);
     opts.tools = tools;
@@ -304,6 +315,7 @@ fn build_opts(
     if let Some(tl) = thinking_level {
         opts.thinking_level = tl;
     }
+    opts.retry = retry;
     opts
 }
 

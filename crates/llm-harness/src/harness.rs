@@ -4,7 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use llm_harness_loop::{
-    ConvertToLlmHook, DefaultConvertToLlm, HookedTool, LlmClient, LoopConfig, agent_loop,
+    ConvertToLlmHook, DefaultConvertToLlm, HookedTool, LlmClient, LoopConfig, RetryConfig,
+    agent_loop,
 };
 use llm_harness_types::*;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -207,6 +208,7 @@ struct HarnessInner {
     current_abort: Option<CancellationToken>,
     queue_capacity: usize,
     max_tokens: u32,
+    retry: Option<RetryConfig>,
 }
 
 impl HarnessInner {
@@ -250,6 +252,8 @@ pub struct AgentHarnessOptions {
     pub skills: Vec<Skill>,
     /// Pre-loaded prompt templates.
     pub templates: Vec<PromptTemplate>,
+    /// Retry config for transient provider errors; `None` disables retry.
+    pub retry: Option<RetryConfig>,
 }
 
 impl AgentHarnessOptions {
@@ -275,6 +279,7 @@ impl AgentHarnessOptions {
             convert_to_llm: None,
             skills: vec![],
             templates: vec![],
+            retry: None,
         }
     }
 }
@@ -420,6 +425,7 @@ impl AgentHarness {
             current_abort: None,
             queue_capacity: cap,
             max_tokens: opts.max_tokens,
+            retry: opts.retry,
         };
 
         let convert_to_llm: Arc<dyn ConvertToLlmHook> = opts
@@ -981,6 +987,7 @@ impl AgentHarness {
     ) -> LoopConfig {
         let inner = self.inner.lock().unwrap();
         let st = &inner.state;
+        let retry = inner.retry.clone();
 
         // Filter tools by active_tools subset.
         let tools: Vec<Arc<dyn Tool>> = match &st.active_tools {
@@ -1036,6 +1043,7 @@ impl AgentHarness {
             auth: self.auth.clone(),
             steer_rx: Some(steer_rx),
             follow_up_rx: Some(follow_up_rx),
+            retry,
         }
     }
 

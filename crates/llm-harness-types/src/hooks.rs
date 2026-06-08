@@ -264,6 +264,7 @@ pub struct BeforeCompactCtx<'a> {
 }
 
 /// `BeforeCompactHook::before_compact` 的返回决策。
+#[allow(clippy::large_enum_variant)]
 pub enum BeforeCompactDecision {
     /// 继续执行框架默认的 compaction 流程。
     Proceed,

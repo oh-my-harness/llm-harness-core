@@ -11,7 +11,7 @@ mod type_bridge;
 pub mod test_utils;
 
 // Top-level re-exports
-pub use config::LoopConfig;
+pub use config::{LoopConfig, RetryConfig};
 pub use convert::{ConvertToLlmHook, CustomMessageConverter, DefaultConvertToLlm};
 pub use hooked_tool::HookedTool;
 pub use loop_fn::{agent_loop, agent_loop_continue};

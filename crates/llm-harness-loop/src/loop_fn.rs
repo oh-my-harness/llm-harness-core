@@ -106,12 +106,27 @@ fn run_loop(
             }
             let req = req_b.build();
 
-            // Call LLM
-            let mut handle = match client.chat_stream(&req).await {
-                Ok(h) => h,
-                Err(e) => {
-                    yield AgentEvent::Error(AgentError::Provider(e.to_string()));
-                    break 'main;
+            // Call LLM (with optional retry on transient errors)
+            let mut handle = {
+                use crate::config::{is_retryable, RetryConfig};
+                let retry = config.retry.as_ref().cloned().unwrap_or(RetryConfig {
+                    max_retries: 0,
+                    base_delay_ms: 0,
+                });
+                let mut attempt = 0u32;
+                loop {
+                    match client.chat_stream(&req).await {
+                        Ok(h) => break h,
+                        Err(e) if is_retryable(&e) && retry.can_retry(attempt) => {
+                            let delay = retry.delay_for(attempt, &e);
+                            tokio::time::sleep(delay).await;
+                            attempt += 1;
+                        }
+                        Err(e) => {
+                            yield AgentEvent::Error(AgentError::Provider(e.to_string()));
+                            break 'main;
+                        }
+                    }
                 }
             };
 
@@ -348,7 +363,10 @@ fn run_loop(
 #[cfg(feature = "test-utils")]
 mod tests {
     use crate::test_utils::{MockLlmClient, MockResponse, NoOpEnv};
+    use crate::{LoopConfig, DefaultConvertToLlm, agent_loop, agent_loop_continue};
     use futures::future::BoxFuture;
+    use futures::StreamExt;
+    use llm_adapter::provider::Provider;
     use llm_harness_types::*;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -374,6 +392,7 @@ mod tests {
             auth: None,
             steer_rx: None,
             follow_up_rx: None,
+            retry: None,
         };
         (client, cfg)
     }
