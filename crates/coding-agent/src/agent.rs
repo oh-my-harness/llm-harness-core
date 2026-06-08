@@ -6,7 +6,7 @@ use llm_harness::{
     AgentHarness, AgentHarnessOptions, JsonlSessionRepo, OsEnv, Session, SessionRepo,
 };
 use llm_harness_loop::LlmClient;
-use llm_harness_types::{ExecutionEnv, HarnessError, Tool};
+use llm_harness_types::{ExecutionEnv, HarnessError, ThinkingLevel, Tool};
 
 use crate::prompt::{ContextFile, SystemPromptOptions, build_system_prompt};
 use crate::tools::{ALL_TOOL_NAMES, DEFAULT_TOOL_NAMES, create_all_tools};
@@ -14,6 +14,8 @@ use crate::tools::{ALL_TOOL_NAMES, DEFAULT_TOOL_NAMES, create_all_tools};
 /// High-level coding agent that wires built-in tools, system prompt, and session together.
 pub struct CodingAgent {
     harness: AgentHarness,
+    /// Session ID when backed by a JSONL session; `None` for in-memory sessions.
+    session_id: Option<String>,
 }
 
 impl CodingAgent {
@@ -33,6 +35,11 @@ impl CodingAgent {
     pub fn harness(&self) -> &AgentHarness {
         &self.harness
     }
+
+    /// Return the JSONL session ID, or `None` for in-memory sessions.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
 }
 
 // ── Builder ────────────────────────────────────────────────────────────────────
@@ -46,6 +53,9 @@ pub struct CodingAgentBuilder {
     allowed_tools: Option<Vec<String>>,
     cwd: Option<PathBuf>,
     session_dir: Option<PathBuf>,
+    resume_session_id: Option<String>,
+    max_tokens: Option<u32>,
+    thinking_level: Option<ThinkingLevel>,
     load_context: bool,
     extra_context_files: Vec<ContextFile>,
     extra_guidelines: Vec<String>,
@@ -63,6 +73,9 @@ impl CodingAgentBuilder {
             allowed_tools: None,
             cwd: None,
             session_dir: None,
+            resume_session_id: None,
+            max_tokens: None,
+            thinking_level: None,
             load_context: true,
             extra_context_files: vec![],
             extra_guidelines: vec![],
@@ -92,6 +105,24 @@ impl CodingAgentBuilder {
     /// Persist the session to a JSONL file in `dir` (default: in-memory only).
     pub fn session_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.session_dir = Some(dir.into());
+        self
+    }
+
+    /// Resume an existing JSONL session by ID (requires `session_dir` to be set).
+    pub fn resume_session(mut self, id: impl Into<String>) -> Self {
+        self.resume_session_id = Some(id.into());
+        self
+    }
+
+    /// Override the maximum output tokens per LLM call (default: 8192).
+    pub fn max_tokens(mut self, n: u32) -> Self {
+        self.max_tokens = Some(n);
+        self
+    }
+
+    /// Set the reasoning depth level (default: Off).
+    pub fn thinking_level(mut self, level: ThinkingLevel) -> Self {
+        self.thinking_level = Some(level);
         self
     }
 
@@ -163,7 +194,7 @@ impl CodingAgentBuilder {
                 .copied()
                 .filter(|name| {
                     requested.iter().any(|r| r == *name)
-                        && allowed.map_or(true, |a| a.iter().any(|x| x == name))
+                        && allowed.is_none_or(|a| a.iter().any(|x| x == name))
                 })
                 .collect()
         };
@@ -195,23 +226,45 @@ impl CodingAgentBuilder {
             extra_guidelines: &self.extra_guidelines,
         });
 
-        let opts = build_opts(self.model, active_tools, system_prompt);
+        let opts = build_opts(
+            self.model,
+            active_tools,
+            system_prompt,
+            self.max_tokens,
+            self.thinking_level,
+        );
 
-        let harness = if let Some(session_dir) = self.session_dir {
+        let (harness, session_id) = if let Some(session_dir) = self.session_dir {
             std::fs::create_dir_all(&session_dir)
                 .map_err(|e| BuildError::SessionDir(e.to_string()))?;
             let repo = JsonlSessionRepo::new(session_dir);
-            let storage = repo
-                .create(CreateSessionOptions::default())
+            let storage = if let Some(ref id) = self.resume_session_id {
+                repo.open(id)
+                    .await
+                    .map_err(|e| BuildError::SessionDir(e.to_string()))?
+            } else {
+                repo.create(CreateSessionOptions::default())
+                    .await
+                    .map_err(|e| BuildError::SessionDir(e.to_string()))?
+            };
+            let sid = storage
+                .metadata()
                 .await
-                .map_err(|e| BuildError::SessionDir(e.to_string()))?;
+                .map_err(|e| BuildError::SessionDir(e.to_string()))?
+                .id;
             let session = Session::new(storage);
-            AgentHarness::with_session(client, env, session, opts)
+            (
+                AgentHarness::with_session(client, env, session, opts),
+                Some(sid),
+            )
         } else {
-            AgentHarness::new_in_memory(client, env, opts).await
+            (AgentHarness::new_in_memory(client, env, opts).await, None)
         };
 
-        Ok(CodingAgent { harness })
+        Ok(CodingAgent {
+            harness,
+            session_id,
+        })
     }
 }
 
@@ -219,10 +272,18 @@ fn build_opts(
     model: String,
     tools: Vec<Arc<dyn Tool>>,
     system_prompt: String,
+    max_tokens: Option<u32>,
+    thinking_level: Option<ThinkingLevel>,
 ) -> AgentHarnessOptions {
     let mut opts = AgentHarnessOptions::new(model);
     opts.tools = tools;
     opts.system_prompt = Some(system_prompt);
+    if let Some(mt) = max_tokens {
+        opts.max_tokens = mt;
+    }
+    if let Some(tl) = thinking_level {
+        opts.thinking_level = tl;
+    }
     opts
 }
 
@@ -241,10 +302,10 @@ pub fn load_project_context_files(cwd: &Path) -> Vec<ContextFile> {
     let mut seen: std::collections::HashSet<PathBuf> = Default::default();
 
     loop {
-        if let Some(cf) = load_context_from_dir(&current) {
-            if seen.insert(cf.path.clone().into()) {
-                ancestors.push(cf);
-            }
+        if let Some(cf) = load_context_from_dir(&current)
+            && seen.insert(cf.path.clone().into())
+        {
+            ancestors.push(cf);
         }
         match current.parent() {
             Some(parent) if parent != current => current = parent.to_path_buf(),
@@ -259,13 +320,13 @@ pub fn load_project_context_files(cwd: &Path) -> Vec<ContextFile> {
 fn load_context_from_dir(dir: &Path) -> Option<ContextFile> {
     for name in CONTEXT_FILE_NAMES {
         let path = dir.join(name);
-        if path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                return Some(ContextFile {
-                    path: path.display().to_string(),
-                    content,
-                });
-            }
+        if path.exists()
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            return Some(ContextFile {
+                path: path.display().to_string(),
+                content,
+            });
         }
     }
     None

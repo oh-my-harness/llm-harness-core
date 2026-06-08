@@ -2,6 +2,8 @@
 //!
 //! Usage:
 //!   coding-agent -p "your prompt"
+//!   coding-agent --session-id <id> -p "follow-up"
+//!   coding-agent --list-sessions
 //!   echo "your prompt" | coding-agent
 //!
 //! Env:
@@ -12,7 +14,8 @@ use std::io::Read;
 use std::sync::Arc;
 
 use llm_adapter::anthropic::AnthropicProvider;
-use llm_harness_types::{AgentMessage, ContentBlock};
+use llm_harness::session::SessionMetadata;
+use llm_harness_types::{AgentMessage, ContentBlock, ThinkingLevel};
 
 use coding_agent::agent::CodingAgent;
 use coding_agent::settings::{SettingsManager, default_config_dir};
@@ -26,36 +29,13 @@ async fn main() {
 }
 
 async fn run() -> i32 {
-    // ── Resolve prompt text ────────────────────────────────────────────────────
-
     let args: Vec<String> = std::env::args().collect();
-    let prompt = match resolve_prompt(&args) {
-        Ok(p) => p,
-        Err(msg) => {
-            eprintln!("Error: {msg}");
-            return 1;
-        }
-    };
 
-    // ── Resolve API key and model ──────────────────────────────────────────────
-
-    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(k) if !k.is_empty() => k,
-        _ => {
-            eprintln!("Error: ANTHROPIC_API_KEY environment variable is not set");
-            return 1;
-        }
-    };
+    // ── Resolve common settings early (needed by both list and prompt paths) ──
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let settings_mgr = SettingsManager::load(&default_config_dir(), Some(&cwd));
 
-    let model = std::env::var("CODING_AGENT_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| settings_mgr.resolved_model(DEFAULT_MODEL));
-
-    // Session dir: from env, settings, or default to ~/.local/share/coding-agent/sessions
     let session_dir = std::env::var("CODING_AGENT_SESSION_DIR")
         .ok()
         .filter(|s| !s.is_empty())
@@ -74,6 +54,40 @@ async fn run() -> i32 {
                 .join("sessions")
         });
 
+    // ── --list-sessions: enumerate persisted sessions then exit ───────────────
+
+    if args.iter().any(|a| a == "--list-sessions") {
+        return list_sessions(&session_dir);
+    }
+
+    // ── Resolve prompt text ────────────────────────────────────────────────────
+
+    let prompt = match resolve_prompt(&args) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("Error: {msg}");
+            return 1;
+        }
+    };
+
+    // ── Resolve API key and model ──────────────────────────────────────────────
+
+    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => {
+            eprintln!("Error: ANTHROPIC_API_KEY environment variable is not set");
+            return 1;
+        }
+    };
+
+    let model = std::env::var("CODING_AGENT_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| settings_mgr.resolved_model(DEFAULT_MODEL));
+
+    // Optional session ID to resume (--session-id <id>).
+    let resume_id = resolve_session_id(&args);
+
     // ── Build and run agent ────────────────────────────────────────────────────
 
     let client = Arc::new(AnthropicProvider::builder(api_key).build());
@@ -82,6 +96,25 @@ async fn run() -> i32 {
         .client(client)
         .session_dir(session_dir);
 
+    if let Some(ref id) = resume_id {
+        builder = builder.resume_session(id);
+    }
+
+    // Wire max_tokens from settings (env override not provided — settings win over default).
+    if let Some(mt) = settings_mgr.settings().max_tokens {
+        builder = builder.max_tokens(mt);
+    }
+
+    // Wire thinking_level from settings.
+    if let Some(level) = settings_mgr
+        .settings()
+        .default_thinking_level
+        .as_deref()
+        .and_then(parse_thinking_level)
+    {
+        builder = builder.thinking_level(level);
+    }
+
     let agent = match builder.build().await {
         Ok(a) => a,
         Err(e) => {
@@ -89,6 +122,11 @@ async fn run() -> i32 {
             return 1;
         }
     };
+
+    // Print session ID to stderr so callers can capture it for future --session-id use.
+    if let Some(sid) = agent.session_id() {
+        eprintln!("session-id: {sid}");
+    }
 
     if let Err(e) = agent.prompt(&prompt).await {
         eprintln!("Error: {e}");
@@ -137,6 +175,55 @@ async fn run() -> i32 {
     }
 }
 
+// ── Subcommand: --list-sessions ───────────────────────────────────────────────
+
+fn list_sessions(dir: &std::path::Path) -> i32 {
+    if !dir.exists() {
+        println!(
+            "No sessions found (directory does not exist: {})",
+            dir.display()
+        );
+        return 0;
+    }
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Error reading session directory: {e}");
+            return 1;
+        }
+    };
+
+    let mut sessions: Vec<SessionMetadata> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let meta_path = e.path().join("meta.json");
+            let bytes = std::fs::read(meta_path).ok()?;
+            serde_json::from_slice(&bytes).ok()
+        })
+        .collect();
+
+    if sessions.is_empty() {
+        println!("No sessions found.");
+        return 0;
+    }
+
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+
+    println!("{:<38}  {:<16}  NAME", "SESSION ID", "UPDATED");
+    println!("{}", "-".repeat(72));
+    for s in &sessions {
+        let name = s.name.as_deref().unwrap_or("(unnamed)");
+        let updated = s.updated_at.format("%Y-%m-%d %H:%M");
+        println!("{:<38}  {:<16}  {}", s.id, updated, name);
+    }
+
+    0
+}
+
+// ── Arg helpers ───────────────────────────────────────────────────────────────
+
 fn resolve_prompt(args: &[String]) -> Result<String, String> {
     // -p "prompt" or --print "prompt"
     for i in 0..args.len() {
@@ -145,8 +232,17 @@ fn resolve_prompt(args: &[String]) -> Result<String, String> {
         }
     }
 
-    // Positional arg (not a flag)
+    // Positional arg: skip values consumed by flags that take a parameter
+    let mut skip_next = false;
     for arg in args.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--session-id" {
+            skip_next = true;
+            continue;
+        }
         if !arg.starts_with('-') {
             return Ok(arg.clone());
         }
@@ -165,4 +261,23 @@ fn resolve_prompt(args: &[String]) -> Result<String, String> {
     }
 
     Err("No prompt provided. Use -p \"prompt\", pass text as argument, or pipe via stdin.".into())
+}
+
+fn resolve_session_id(args: &[String]) -> Option<String> {
+    for i in 0..args.len() {
+        if args[i] == "--session-id" && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
+        }
+    }
+    None
+}
+
+fn parse_thinking_level(s: &str) -> Option<ThinkingLevel> {
+    match s.to_lowercase().as_str() {
+        "off" | "none" => Some(ThinkingLevel::Off),
+        "low" => Some(ThinkingLevel::Low),
+        "medium" | "med" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        _ => None,
+    }
 }
