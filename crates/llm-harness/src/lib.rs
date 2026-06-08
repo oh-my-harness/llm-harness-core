@@ -12,7 +12,9 @@ pub use harness::{
     AgentHarness, AgentHarnessEvent, AgentHarnessOptions, CompactionStats, HarnessHooks,
     HarnessState, HarnessToolCallResult,
 };
-pub use session::{InMemorySessionRepo, JsonlSessionRepo, Session, SessionRepo, SessionStorage};
+pub use session::{
+    BuiltContext, InMemorySessionRepo, JsonlSessionRepo, Session, SessionRepo, SessionStorage,
+};
 pub use skills::{
     PromptTemplate, Skill, SkillDiagnostic, SourcedSkill, format_skill_invocation,
     format_skills_for_system_prompt, invoke_template, load_prompt_templates, load_skills,

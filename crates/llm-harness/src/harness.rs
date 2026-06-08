@@ -755,6 +755,11 @@ impl AgentHarness {
         Ok(self.session.list_branches().await?)
     }
 
+    /// Build the effective LLM context from the active session path.
+    pub async fn build_context(&self) -> Result<BuiltContext, HarnessError> {
+        Ok(self.session.build_context().await?)
+    }
+
     // ── Queue operations (any phase) ──────────────────────────────────────
 
     /// Enqueue a text message as a steer.
@@ -1227,6 +1232,29 @@ impl AgentHarness {
             }
         });
 
+        // before_compact hook is called BEFORE prepare_compaction so that
+        // BeforeCompactDecision::Override can bypass the token-threshold check entirely.
+        if let Some(ref h) = self.hooks.before_compact {
+            let built = self.session.build_context().await?;
+            // Rough token estimate before detailed preparation (Override hooks don't need accuracy).
+            let rough_tokens = path.len() * 100;
+            let decision = h
+                .before_compact(BeforeCompactCtx {
+                    estimated_tokens: rough_tokens,
+                    messages: &built.messages,
+                })
+                .await;
+            match decision {
+                BeforeCompactDecision::Skip => {
+                    return Err(CompactionError::InsufficientTokens.into());
+                }
+                BeforeCompactDecision::Override(result) => {
+                    return self.apply_compaction_result(result, &path).await;
+                }
+                BeforeCompactDecision::Proceed => {}
+            }
+        }
+
         let (model_info, model, max_tokens) = {
             let inner = self.inner.lock().unwrap();
             (
@@ -1254,26 +1282,6 @@ impl AgentHarness {
             Some(p) => p,
             None => return Err(CompactionError::InsufficientTokens.into()),
         };
-
-        // before_compact hook.
-        if let Some(ref h) = self.hooks.before_compact {
-            let built = self.session.build_context().await?;
-            let decision = h
-                .before_compact(BeforeCompactCtx {
-                    estimated_tokens: prep.estimated_tokens,
-                    messages: &built.messages,
-                })
-                .await;
-            match decision {
-                BeforeCompactDecision::Skip => {
-                    return Err(CompactionError::InsufficientTokens.into());
-                }
-                BeforeCompactDecision::Override(result) => {
-                    return self.apply_compaction_result(result, &path).await;
-                }
-                BeforeCompactDecision::Proceed => {}
-            }
-        }
 
         let estimated_tokens = prep.estimated_tokens;
         self.emit(AgentHarnessEvent::CompactionStart { estimated_tokens });
