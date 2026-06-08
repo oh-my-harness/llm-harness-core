@@ -6,6 +6,17 @@ use llm_harness_types::*;
 
 use crate::config::LoopConfig;
 
+fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
+    match level {
+        ThinkingLevel::Off => None,
+        ThinkingLevel::Minimal => Some(512),
+        ThinkingLevel::Low => Some(1_024),
+        ThinkingLevel::Medium => Some(8_192),
+        ThinkingLevel::High => Some(32_000),
+        ThinkingLevel::XHigh => Some(64_000),
+    }
+}
+
 /// Start an agent loop from a new context.
 pub fn agent_loop(
     client: Arc<dyn Provider>,
@@ -103,6 +114,9 @@ fn run_loop(
                 .tool_choice(tool_choice);
             if let Some(t) = config.temperature {
                 req_b = req_b.temperature(t);
+            }
+            if let Some(budget) = thinking_budget(config.thinking_level) {
+                req_b = req_b.extended_thinking_budget(budget);
             }
             let req = req_b.build();
 

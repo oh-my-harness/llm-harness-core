@@ -314,9 +314,11 @@ fn resolve_flag_value(args: &[String], flag: &str) -> Option<String> {
 fn parse_thinking_level(s: &str) -> Option<ThinkingLevel> {
     match s.to_lowercase().as_str() {
         "off" | "none" => Some(ThinkingLevel::Off),
+        "minimal" | "min" => Some(ThinkingLevel::Minimal),
         "low" => Some(ThinkingLevel::Low),
         "medium" | "med" => Some(ThinkingLevel::Medium),
         "high" => Some(ThinkingLevel::High),
+        "xhigh" | "x-high" | "max" => Some(ThinkingLevel::XHigh),
         _ => None,
     }
 }
