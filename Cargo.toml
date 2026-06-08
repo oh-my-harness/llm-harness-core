@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/llm-harness-types", "crates/llm-harness-loop", "crates/llm-harness"]
+members = ["crates/llm-harness-types", "crates/llm-harness-loop", "crates/llm-harness", "crates/coding-agent"]
 resolver = "2"
 
 [workspace.package]

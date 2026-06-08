@@ -1,0 +1,19 @@
+[package]
+name = "coding-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+llm-harness-types = { workspace = true }
+llm-harness        = { path = "../llm-harness" }
+serde_json         = { workspace = true }
+futures            = { workspace = true }
+tokio              = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
+chrono             = { workspace = true }
+
+[dev-dependencies]
+tokio          = { workspace = true, features = ["full", "test-util"] }
+tempfile       = { workspace = true }
+llm-harness-loop = { path = "../llm-harness-loop", features = ["test-utils"] }

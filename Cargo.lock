@@ -117,6 +117,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "coding-agent"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "llm-harness",
+ "llm-harness-loop",
+ "llm-harness-types",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
