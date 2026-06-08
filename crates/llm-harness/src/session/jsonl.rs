@@ -299,6 +299,47 @@ impl SessionStorage for JsonlSessionStorage {
             Self::persist_meta(&inner).await
         })
     }
+
+    fn delete_entries(&self, ids: Vec<EntryId>) -> BoxFuture<'_, Result<(), SessionError>> {
+        Box::pin(async move {
+            let ids_set: std::collections::HashSet<EntryId> = ids.into_iter().collect();
+            let mut inner = self.inner.lock().await;
+            Self::ensure_loaded(&mut inner).await?;
+
+            let mut cursor_reset = false;
+            for id in &ids_set {
+                if let Some(entry) = inner.entry_map.remove(id)
+                    && let Some(children) = inner.children_map.get_mut(&entry.parent_id)
+                {
+                    children.retain(|c| c != id);
+                }
+                inner.children_map.remove(&Some(*id));
+            }
+            if let Some(cursor) = inner.metadata.active_cursor
+                && ids_set.contains(&cursor)
+            {
+                inner.metadata.active_cursor = None;
+                cursor_reset = true;
+            }
+
+            // Rewrite JSONL file without the deleted entries (sorted for determinism).
+            let mut remaining: Vec<&SessionEntry> = inner.entry_map.values().collect();
+            remaining.sort_by_key(|e| e.id);
+            let mut content = String::new();
+            for entry in remaining {
+                let line = serde_json::to_string(entry)
+                    .map_err(|e| SessionError::Serialization(e.to_string()))?;
+                content.push_str(&line);
+                content.push('\n');
+            }
+            tokio::fs::write(&inner.entries_path, content.as_bytes()).await?;
+
+            if cursor_reset {
+                Self::persist_meta(&inner).await?;
+            }
+            Ok(())
+        })
+    }
 }
 
 // ── JsonlSessionRepo ───────────────────────────────────────────────────────────

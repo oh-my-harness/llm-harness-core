@@ -137,7 +137,7 @@ fn estimate_tokens_for_message(msg: &AgentMessage) -> usize {
     }
 }
 
-fn estimate_tokens_for_entry(entry: &SessionEntry) -> usize {
+pub(crate) fn estimate_tokens_for_entry(entry: &SessionEntry) -> usize {
     match &entry.payload {
         SessionEntryPayload::Message(msg) => estimate_tokens_for_message(msg),
         // Config changes contribute negligible tokens.
@@ -347,7 +347,7 @@ pub async fn compact(
 
 // ── Conversation serialization ────────────────────────────────────────────────
 
-fn format_entries_as_text(entries: &[SessionEntry]) -> String {
+pub(crate) fn format_entries_as_text(entries: &[SessionEntry]) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     for entry in entries {

@@ -57,6 +57,14 @@ pub trait SessionStorage: Send + Sync {
         &self,
         model: Option<String>,
     ) -> BoxFuture<'_, Result<(), SessionError>>;
+
+    /// Delete the given entries and remove them from the children index.
+    ///
+    /// If the active cursor is among the deleted IDs it is reset to `None`.
+    fn delete_entries(
+        &self,
+        ids: Vec<EntryId>,
+    ) -> BoxFuture<'_, Result<(), SessionError>>;
 }
 
 // ── InMemorySessionStorage ─────────────────────────────────────────────────────
@@ -258,6 +266,27 @@ impl SessionStorage for InMemorySessionStorage {
     ) -> BoxFuture<'_, Result<(), SessionError>> {
         Box::pin(async move {
             self.inner.lock().unwrap().metadata.model = model;
+            Ok(())
+        })
+    }
+
+    fn delete_entries(&self, ids: Vec<EntryId>) -> BoxFuture<'_, Result<(), SessionError>> {
+        Box::pin(async move {
+            let ids_set: std::collections::HashSet<EntryId> = ids.into_iter().collect();
+            let mut st = self.inner.lock().unwrap();
+            for id in &ids_set {
+                if let Some(entry) = st.entries.remove(id)
+                    && let Some(children) = st.children.get_mut(&entry.parent_id)
+                {
+                    children.retain(|c| c != id);
+                }
+                st.children.remove(&Some(*id));
+            }
+            if let Some(cursor) = st.metadata.active_cursor
+                && ids_set.contains(&cursor)
+            {
+                st.metadata.active_cursor = None;
+            }
             Ok(())
         })
     }

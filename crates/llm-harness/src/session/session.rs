@@ -130,6 +130,56 @@ impl Session {
         Ok(bp_id)
     }
 
+    /// Delete the branch ending at `leaf`.
+    ///
+    /// Walks up via `parent_id`, collecting entries to delete until it hits a
+    /// parent that has other children (shared ancestor). The shared ancestor is
+    /// preserved. If the active cursor was on a deleted entry, it is reset to
+    /// the nearest surviving ancestor.
+    pub async fn delete_branch(&self, leaf: EntryId) -> Result<(), SessionError> {
+        let mut to_delete: Vec<EntryId> = Vec::new();
+        let mut current = leaf;
+
+        loop {
+            let entry = self
+                .storage
+                .get_entry(current)
+                .await?
+                .ok_or(SessionError::EntryNotFound(current))?;
+            to_delete.push(current);
+            match entry.parent_id {
+                None => break, // reached root
+                Some(parent_id) => {
+                    let siblings = self.storage.children(parent_id).await?;
+                    if siblings.len() > 1 {
+                        // Parent has other children — stop before deleting it.
+                        break;
+                    }
+                    current = parent_id;
+                }
+            }
+        }
+
+        // Determine new cursor: the parent of the topmost entry we delete.
+        let top_entry = self
+            .storage
+            .get_entry(*to_delete.last().unwrap())
+            .await?;
+        let new_cursor = top_entry.and_then(|e| e.parent_id);
+
+        let old_cursor = self.storage.active_cursor().await?;
+        let cursor_deleted = old_cursor.is_some_and(|c| to_delete.contains(&c));
+
+        self.storage.delete_entries(to_delete).await?;
+
+        // Restore cursor to surviving ancestor if it was deleted.
+        if cursor_deleted && let Some(c) = new_cursor {
+            self.storage.set_active_cursor(c).await?;
+        }
+
+        Ok(())
+    }
+
     /// Return a list of all branches (one per leaf).
     pub async fn list_branches(&self) -> Result<Vec<BranchInfo>, SessionError> {
         let leaves = self.storage.all_leaves().await?;

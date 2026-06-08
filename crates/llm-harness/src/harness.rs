@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use llm_harness_loop::{
-    ConvertToLlmHook, DefaultConvertToLlm, HookedTool, LlmClient, LoopConfig, RetryConfig,
-    agent_loop,
+    ChatRequest, ConvertToLlmHook, DefaultConvertToLlm, HookedTool, LlmClient, LlmMessage,
+    LoopConfig, RequestContent, RetryConfig, agent_loop,
 };
 use llm_harness_types::*;
 use tokio::sync::{broadcast, mpsc, watch};
@@ -171,7 +171,7 @@ pub enum AgentHarnessEvent {
     },
     /// Session writes flushed.
     SavePoint { entries_flushed: usize },
-    /// A new branch was forked.
+    /// A branch was forked.
     BranchForked {
         from: EntryId,
         new_leaf: EntryId,
@@ -179,6 +179,10 @@ pub enum AgentHarnessEvent {
     },
     /// Branch cursor was switched.
     BranchSwitched { from: EntryId, to: EntryId },
+    /// A branch was deleted.
+    BranchDeleted { leaf: EntryId },
+    /// A branch summary was generated and persisted.
+    BranchSummarized { leaf: EntryId, summary: String },
     /// A tool call started.
     ToolCallStart {
         tool_use_id: String,
@@ -771,6 +775,96 @@ impl AgentHarness {
         Ok(self.session.list_branches().await?)
     }
 
+    /// Delete the branch ending at `leaf` (Idle only).
+    pub async fn delete_branch(&self, leaf: EntryId) -> Result<(), HarnessError> {
+        {
+            let inner = self.inner.lock().unwrap();
+            if inner.state.phase != HarnessPhase::Idle {
+                return Err(HarnessError::NotIdle(inner.state.phase));
+            }
+        }
+        self.session.delete_branch(leaf).await?;
+        self.emit(AgentHarnessEvent::BranchDeleted { leaf });
+        Ok(())
+    }
+
+    /// Generate an AI summary for the branch ending at `leaf` and persist it (Idle only).
+    ///
+    /// Calls the current model to summarize the branch conversation, then appends
+    /// a `BranchSummary` entry to the session.
+    pub async fn generate_branch_summary(
+        &self,
+        leaf: EntryId,
+    ) -> Result<BranchSummaryEntry, HarnessError> {
+        {
+            let inner = self.inner.lock().unwrap();
+            if inner.state.phase != HarnessPhase::Idle {
+                return Err(HarnessError::NotIdle(inner.state.phase));
+            }
+        }
+
+        let path = self.session.read_path_of(leaf).await?;
+        if path.is_empty() {
+            return Err(SessionError::EntryNotFound(leaf).into());
+        }
+
+        let (model, max_tokens) = {
+            let inner = self.inner.lock().unwrap();
+            (inner.state.model.clone(), inner.max_tokens)
+        };
+
+        let conversation_text = crate::compaction::format_entries_as_text(&path);
+        let user_content = format!(
+            "Here is the conversation branch to summarize:\n\n\
+            <conversation>\n{conversation_text}\n</conversation>\n\n\
+            Produce a concise summary of what was accomplished in this branch, \
+            key decisions made, and any outstanding work."
+        );
+
+        let req = ChatRequest::builder(model, max_tokens.min(4096))
+            .messages(vec![
+                LlmMessage::System(
+                    "You are a context summarization assistant. Summarize the provided \
+                    conversation branch concisely, preserving goals, decisions, and next steps."
+                        .to_string(),
+                ),
+                LlmMessage::User(vec![RequestContent::Text(user_content)]),
+            ])
+            .build();
+
+        let response = self
+            .client
+            .chat(&req)
+            .await
+            .map_err(|e| CompactionError::SummaryFailed(e.to_string()))?;
+
+        let summary = response.text();
+
+        let from_entry = path.first().map(|e| e.id).unwrap_or(leaf);
+        let token_count: usize = path
+            .iter()
+            .map(crate::compaction::estimate_tokens_for_entry)
+            .sum();
+
+        let entry = BranchSummaryEntry {
+            leaf_id: leaf,
+            from_entry,
+            summary,
+            token_count,
+        };
+
+        self.session
+            .append(SessionEntryPayload::BranchSummary(entry.clone()))
+            .await?;
+
+        self.emit(AgentHarnessEvent::BranchSummarized {
+            leaf,
+            summary: entry.summary.clone(),
+        });
+
+        Ok(entry)
+    }
+
     /// Build the effective LLM context from the active session path.
     pub async fn build_context(&self) -> Result<BuiltContext, HarnessError> {
         Ok(self.session.build_context().await?)
@@ -891,6 +985,31 @@ impl AgentHarness {
             }
             if rx.changed().await.is_err() {
                 return;
+            }
+        }
+    }
+
+    /// Async-wait until all pending session writes have been flushed to disk.
+    ///
+    /// Returns immediately when the harness is already idle (writes already flushed).
+    /// Otherwise waits for the next `Settled` or `Aborted` event.
+    pub async fn wait_for_settled(&self) {
+        // Subscribe before the phase check to avoid missing the Settled event.
+        let mut rx = self.event_tx.subscribe();
+        if *self.phase_rx.borrow() == HarnessPhase::Idle {
+            return;
+        }
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    if matches!(
+                        ev.as_ref(),
+                        AgentHarnessEvent::Settled | AgentHarnessEvent::Aborted
+                    ) {
+                        return;
+                    }
+                }
+                Err(_) => return,
             }
         }
     }
