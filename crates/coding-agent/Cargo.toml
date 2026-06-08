@@ -9,6 +9,7 @@ llm-harness-types = { workspace = true }
 llm-harness-loop  = { workspace = true }
 llm-harness        = { path = "../llm-harness" }
 llm_adapter        = { path = "../../../llm-api-adapter" }
+serde              = { workspace = true }
 serde_json         = { workspace = true }
 futures            = { workspace = true }
 tokio              = { workspace = true, features = ["full"] }
@@ -16,6 +17,7 @@ tokio-util = { workspace = true }
 chrono             = { workspace = true }
 thiserror          = { workspace = true }
 atty               = "0.2"
+dirs-next          = "2"
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["full", "test-util"] }

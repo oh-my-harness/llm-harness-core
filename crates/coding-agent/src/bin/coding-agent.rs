@@ -6,7 +6,7 @@
 //!
 //! Env:
 //!   ANTHROPIC_API_KEY  – required Anthropic API key
-//!   CODING_AGENT_MODEL – model ID (default: claude-sonnet-4-6)
+//!   CODING_AGENT_MODEL – override model (else reads from settings.json)
 
 use std::io::Read;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use llm_adapter::anthropic::AnthropicProvider;
 use llm_harness_types::{AgentMessage, ContentBlock};
 
 use coding_agent::agent::CodingAgent;
+use coding_agent::settings::{SettingsManager, default_config_dir};
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
@@ -46,7 +47,13 @@ async fn run() -> i32 {
         }
     };
 
-    let model = std::env::var("CODING_AGENT_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let settings_mgr = SettingsManager::load(&default_config_dir(), Some(&cwd));
+
+    let model = std::env::var("CODING_AGENT_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| settings_mgr.resolved_model(DEFAULT_MODEL));
 
     // ── Build and run agent ────────────────────────────────────────────────────
 
