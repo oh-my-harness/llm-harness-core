@@ -55,11 +55,34 @@ async fn run() -> i32 {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| settings_mgr.resolved_model(DEFAULT_MODEL));
 
+    // Session dir: from env, settings, or default to ~/.local/share/coding-agent/sessions
+    let session_dir = std::env::var("CODING_AGENT_SESSION_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            settings_mgr
+                .settings()
+                .session_dir
+                .as_deref()
+                .map(std::path::PathBuf::from)
+        })
+        .unwrap_or_else(|| {
+            dirs_next::data_dir()
+                .unwrap_or_else(|| cwd.join(".sessions"))
+                .join("coding-agent")
+                .join("sessions")
+        });
+
     // ── Build and run agent ────────────────────────────────────────────────────
 
     let client = Arc::new(AnthropicProvider::builder(api_key).build());
 
-    let agent = match CodingAgent::builder(&model).client(client).build().await {
+    let mut builder = CodingAgent::builder(&model)
+        .client(client)
+        .session_dir(session_dir);
+
+    let agent = match builder.build().await {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error building agent: {e}");

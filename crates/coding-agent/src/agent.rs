@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use llm_harness::{AgentHarness, AgentHarnessOptions, OsEnv};
+use llm_harness::session::CreateSessionOptions;
+use llm_harness::{
+    AgentHarness, AgentHarnessOptions, JsonlSessionRepo, OsEnv, Session, SessionRepo,
+};
 use llm_harness_loop::LlmClient;
 use llm_harness_types::{ExecutionEnv, HarnessError, Tool};
 
@@ -42,6 +45,7 @@ pub struct CodingAgentBuilder {
     active_tools: Option<Vec<String>>,
     allowed_tools: Option<Vec<String>>,
     cwd: Option<PathBuf>,
+    session_dir: Option<PathBuf>,
     load_context: bool,
     extra_context_files: Vec<ContextFile>,
     extra_guidelines: Vec<String>,
@@ -58,6 +62,7 @@ impl CodingAgentBuilder {
             active_tools: None,
             allowed_tools: None,
             cwd: None,
+            session_dir: None,
             load_context: true,
             extra_context_files: vec![],
             extra_guidelines: vec![],
@@ -81,6 +86,12 @@ impl CodingAgentBuilder {
     /// Override the working directory (default: current process directory).
     pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
         self.cwd = Some(cwd.into());
+        self
+    }
+
+    /// Persist the session to a JSONL file in `dir` (default: in-memory only).
+    pub fn session_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.session_dir = Some(dir.into());
         self
     }
 
@@ -186,7 +197,20 @@ impl CodingAgentBuilder {
 
         let opts = build_opts(self.model, active_tools, system_prompt);
 
-        let harness = AgentHarness::new_in_memory(client, env, opts).await;
+        let harness = if let Some(session_dir) = self.session_dir {
+            std::fs::create_dir_all(&session_dir)
+                .map_err(|e| BuildError::SessionDir(e.to_string()))?;
+            let repo = JsonlSessionRepo::new(session_dir);
+            let storage = repo
+                .create(CreateSessionOptions::default())
+                .await
+                .map_err(|e| BuildError::SessionDir(e.to_string()))?;
+            let session = Session::new(storage);
+            AgentHarness::with_session(client, env, session, opts)
+        } else {
+            AgentHarness::new_in_memory(client, env, opts).await
+        };
+
         Ok(CodingAgent { harness })
     }
 }
@@ -253,6 +277,8 @@ fn load_context_from_dir(dir: &Path) -> Option<ContextFile> {
 pub enum BuildError {
     #[error("LLM client is required; call .client(...)")]
     MissingClient,
+    #[error("Session directory error: {0}")]
+    SessionDir(String),
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
