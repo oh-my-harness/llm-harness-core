@@ -122,6 +122,7 @@ pub struct ListSessionOptions {
     pub name_contains:  Option<String>,
 }
 pub enum ListOrder { CreatedAsc, CreatedDesc, UpdatedAsc, UpdatedDesc }
+// 默认值：UpdatedDesc（最近修改的排前面）
 
 /// 底层存储 trait：负责字节追加 + 树查询 + 活跃 cursor 追踪。
 /// 实现方负责内部串行化——append/set_active_cursor 等写操作必须原子。

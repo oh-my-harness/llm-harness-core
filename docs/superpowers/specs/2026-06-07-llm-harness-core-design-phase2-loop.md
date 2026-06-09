@@ -128,14 +128,27 @@ impl ConvertToLlmHook for DefaultConvertToLlm { /* ... */ }
 
 ```rust
 pub struct LoopConfig {
+    // === LLM sampling ===
+    pub model:                  String,
+    pub max_tokens:             u32,
+    pub temperature:            Option<f32>,
+    pub thinking_level:         ThinkingLevel,
+
+    // === Tools ===
     pub tools:                  Vec<Arc<dyn Tool>>,
     pub default_execution_mode: ToolExecutionMode,
+
+    // === Execution environment ===
+    pub env:                    Arc<dyn ExecutionEnv>,
+    pub abort:                  CancellationToken,
+
+    // === Stream options ===
     pub stream_options:         StreamOptions,
 
-    /// 必需
+    // === Required hooks ===
     pub convert_to_llm:         Arc<dyn ConvertToLlmHook>,
 
-    /// 可选 hooks
+    // === Optional hooks ===
     pub transform_context:      Option<Arc<dyn TransformContextHook>>,
     pub prepare_next_turn:      Option<Arc<dyn PrepareNextTurnHook>>,
     pub should_stop:            Option<Arc<dyn ShouldStopHook>>,
@@ -143,19 +156,28 @@ pub struct LoopConfig {
     pub after_provider_response: Option<Arc<dyn AfterProviderResponseHook>>,
     pub auth:                   Option<Arc<dyn AuthHook>>,
 
-    /// 响应式注入 channels——载荷为完整 AgentMessage 以支持多模态
-    pub steer_rx:               Option<tokio::sync::mpsc::Receiver<AgentMessage>>,
-    pub follow_up_rx:           Option<tokio::sync::mpsc::Receiver<AgentMessage>>,
+    // === Reactive injection ===
+    pub steer_rx:               Option<mpsc::Receiver<AgentMessage>>,
+    pub follow_up_rx:           Option<mpsc::Receiver<AgentMessage>>,
+
+    // === Retry ===
+    pub retry:                  Option<RetryConfig>,
 }
 ```
 
 > **设计理由（逐字段）：**
 >
+> **`model` / `max_tokens` / `temperature` / `thinking_level`**：LLM 采样参数直接放在 LoopConfig 中，而非只放在 AgentContext。每次 turn 启动前 Harness 从 HarnessState 快照这些值后一并填入 LoopConfig，使 loop 函数自包含——不需要额外的 context 字段就能构造完整的 API 请求。
+>
 > **`tools`**：Vec 而非 HashSet——工具顺序可能重要（某些 LLM 对 tool definition 的顺序敏感）。`Arc<dyn Tool>` 允许工具实例在多个 turn 之间共享（不 clone 整个 tool 对象）。
 >
 > **`default_execution_mode`**：当 tool 自身的 `execution_mode()` 返回默认值时（绝大多数 tool 不覆盖此方法），使用此配置作为 fallback。允许调用方全局切换 "全部并行" vs "全部顺序"。
 >
-> **`stream_options`**：直接传递给 `LlmClient::stream`。包括 timeout、retry、headers、metadata、cache 配置。
+> **`env`**：工具执行时的操作系统接口（读文件、运行命令等）。传入 LoopConfig 使 loop 可直接为 `ToolContext` 提供环境引用，无需 Harness 在 tool 包装层单独持有。
+>
+> **`abort`**：`CancellationToken`（来自 `tokio-util`），取代旧设计中的 `watch::Receiver<bool>`。loop 和 `ToolContext` 都持有 token；Harness 通过 `.cancel()` 触发中止，无需轮询。
+>
+> **`stream_options`**：直接传递给 `LlmClient::stream`。包括 timeout、headers、metadata、cache 配置。
 >
 > **`convert_to_llm`（必需）**：没有此 hook，loop 无法将 AgentMessage 转为 LLM API 格式。必需性的强制——如果缺失，loop 在构造时就 panic（或 `new` 返回 `Err`）。
 >
@@ -164,6 +186,8 @@ pub struct LoopConfig {
 > **`steer_rx` / `follow_up_rx`**：channel 接收端。`Option` 允许不启用响应式注入。使用 `AgentMessage` 而非 `String`——steer 消息可能包含图片等多模态内容。
 >
 > **LoopConfig 是消耗型（owned）而非 borrow 型：** 函数签名 `agent_loop(config: LoopConfig)` 而非 `config: &LoopConfig`。这允许 loop 在内部解构 config——将 `tools` move 到内部状态，将 `steer_rx` move 到 poll 循环中。避免不必要的 clone。
+>
+> **`retry`**：瞬态 provider 错误（限速、服务过载、超时）的重试配置。`None` 禁用重试。由 Harness 从设置中读取后填入，loop 在每次 provider 请求失败时根据此配置决定是否重试及等待时长。
 
 ---
 
