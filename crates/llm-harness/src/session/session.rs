@@ -161,10 +161,7 @@ impl Session {
         }
 
         // Determine new cursor: the parent of the topmost entry we delete.
-        let top_entry = self
-            .storage
-            .get_entry(*to_delete.last().unwrap())
-            .await?;
+        let top_entry = self.storage.get_entry(*to_delete.last().unwrap()).await?;
         let new_cursor = top_entry.and_then(|e| e.parent_id);
 
         let old_cursor = self.storage.active_cursor().await?;

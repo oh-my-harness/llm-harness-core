@@ -49,8 +49,8 @@ pub mod prelude {
     pub use llm_harness_types::{
         AgentError, AgentEvent, AgentMessage, AssistantMessage, AuthHook, BranchSummaryMessage,
         CompactionError, CompactionSummaryMessage, ContentBlock, DiagnosticLevel, EntryId,
-        EnvError, ExecutionEnv, HarnessError, HarnessPhase, ImageSource, ShellOptions,
-        ShellOutput, StopReason, StreamOptions, ThinkingLevel, TokenUsage, Tool, ToolContext,
-        ToolError, ToolExecutionMode, ToolResult, UserMessage,
+        EnvError, ExecutionEnv, HarnessError, HarnessPhase, ImageSource, ShellOptions, ShellOutput,
+        StopReason, StreamOptions, ThinkingLevel, TokenUsage, Tool, ToolContext, ToolError,
+        ToolExecutionMode, ToolResult, UserMessage,
     };
 }

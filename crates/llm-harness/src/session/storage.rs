@@ -61,10 +61,7 @@ pub trait SessionStorage: Send + Sync {
     /// Delete the given entries and remove them from the children index.
     ///
     /// If the active cursor is among the deleted IDs it is reset to `None`.
-    fn delete_entries(
-        &self,
-        ids: Vec<EntryId>,
-    ) -> BoxFuture<'_, Result<(), SessionError>>;
+    fn delete_entries(&self, ids: Vec<EntryId>) -> BoxFuture<'_, Result<(), SessionError>>;
 }
 
 // ── InMemorySessionStorage ─────────────────────────────────────────────────────
