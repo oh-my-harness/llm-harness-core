@@ -1,17 +1,20 @@
 # llm-harness-core
 
-Rust workspace for building LLM agent runtimes. The project separates pure agent
-types, the streaming loop, stateful harness/session logic, and a small coding
-agent CLI.
+Rust workspace for building LLM agent frameworks. The project separates shared
+agent types, the streaming loop, and the session-backed harness layer.
+
+`llm-harness-core` is a framework SDK, not a concrete agent product. It defines
+how agents run; concrete tools, product prompts, settings/auth management, CLI,
+TUI, HTTP, RPC, MCP, and packaging live in upper layers such as
+`llm-harness-runtime` or domain-agent repositories.
 
 ## Workspace Layout
 
 ```text
 crates/
-  llm-harness-types   Pure shared types and traits
+  llm-harness-types   Shared messages, events, Tool, ExecutionEnv, hooks
   llm-harness-loop    Streaming agent loop and adapter bridge
-  llm-harness         Agent, harness, sessions, compaction, skills
-  coding-agent        CLI application built on the harness
+  llm-harness         Agent, AgentHarness, sessions, compaction, skills
 ```
 
 The LLM provider layer is supplied by `llm_adapter` from:
@@ -23,49 +26,64 @@ https://github.com/oh-my-harness/llm-api-adapter.git
 The dependency is pinned by commit in `Cargo.toml` and `Cargo.lock` for
 reproducible builds.
 
+## What Belongs Here
+
+- Message and content model.
+- Tool and execution environment abstractions.
+- Streaming LLM loop and tool scheduling.
+- `Agent` for lightweight stateful runs.
+- `AgentHarness` for session-backed agents.
+- Session storage, branches, context rebuilding, compaction, skills, and hooks.
+
+## What Does Not Belong Here
+
+- Concrete tools such as read, bash, edit, write, grep, find, or ls.
+- Tool registry policy, settings, auth storage, or model registry.
+- Product system prompts.
+- CLI, TUI, HTTP, RPC, MCP, or product packaging.
+- Domain-specific tools or resources.
+
+Those responsibilities belong in `llm-harness-runtime` or concrete agent
+repositories.
+
+## Recommended Usage Paths
+
+- Use `Agent` for lightweight scripts, tests, and prototypes that do not need
+  persistent sessions.
+- Use `AgentHarness` for real agents that need sessions, hooks, skills,
+  compaction, events, and branch operations.
+- Use `agent_loop` directly only for advanced framework integrations or custom
+  runtimes.
+- Use `llm-harness-runtime` when you want a batteries-included application
+  runtime with common tools, settings, auth, model registry, and prompt assembly.
+
 ## Requirements
 
-- Rust toolchain with edition 2024 support
-- Network access for first-time Cargo dependency fetches
-- `ANTHROPIC_API_KEY` when running the `coding-agent` CLI against Anthropic
+- Rust toolchain with edition 2024 support.
+- Network access for first-time Cargo dependency fetches.
 
-On Windows, the shell tool expects a Bash-compatible shell. Resolution order:
-
-1. `CODING_AGENT_SHELL`
-2. `C:\Program Files\Git\bin\bash.exe`
-3. `bash.exe` on `PATH`
-
-The `grep` and `find` tools are implemented in Rust and do not require `rg`,
-`grep`, `fd`, `sort`, or `head`.
-
-## Build And Test
+## Build, Test, And Docs
 
 ```powershell
-cargo check
-cargo build
-cargo test
+cargo check --workspace
+cargo build --workspace
+cargo test --workspace
+cargo doc --workspace --no-deps
 ```
 
-## Run The CLI
+Generated API docs are written under:
 
-```powershell
-$env:ANTHROPIC_API_KEY = "<your-key>"
-cargo run -p coding-agent -- -p "summarize this repository"
+```text
+target/doc/llm_harness/index.html
 ```
 
-Interactive mode:
+## Design Documents
 
-```powershell
-cargo run -p coding-agent -- --interactive
-```
-
-Session utilities:
-
-```powershell
-cargo run -p coding-agent -- --list-sessions
-cargo run -p coding-agent -- --session-id <id> -p "continue"
-cargo run -p coding-agent -- --delete-session <id>
-```
+- Core design: `docs/superpowers/specs/2026-06-07-llm-harness-core-design.md`
+- Core/runtime SDK boundary:
+  `docs/superpowers/specs/2026-06-10-core-runtime-sdk-boundary-design.md`
+- Implementation plan:
+  `docs/superpowers/plans/2026-06-10-core-sdk-boundary.md`
 
 ## Line Endings
 
