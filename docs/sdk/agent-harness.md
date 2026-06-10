@@ -1,19 +1,18 @@
-# AgentHarness Guide
+# AgentHarness 指南
 
-Use `AgentHarness` for real agents that need durable conversation state. It
-directly drives `agent_loop`; it does not wrap `Agent`. Session storage is the
-source of truth for message history.
+当 Agent 需要持久化对话状态时，使用 `AgentHarness`。它会直接驱动
+`agent_loop`，并不是对 `Agent` 的包装。Session storage 是消息历史的事实来源。
 
-`AgentHarness` is the right entrypoint for:
+以下场景适合使用 `AgentHarness`：
 
-- Session-backed prompts.
-- Branch, navigate, and delete operations.
-- Compaction.
-- Skills and prompt templates.
-- Harness hooks.
-- Event subscription for UI, logs, or telemetry.
+- 带 session 的 prompt。
+- branch、navigate 和 delete 操作。
+- Compaction。
+- Skills 和 prompt templates。
+- Harness hooks。
+- 面向 UI、日志或 telemetry 的事件订阅。
 
-## Minimal Shape
+## 最小形态
 
 ```rust
 use std::sync::Arc;
@@ -44,14 +43,12 @@ async fn run(client: Arc<dyn LlmClient>) -> anyhow::Result<()> {
 
 ## Tools
 
-Core does not provide concrete tools. Register tools by passing
-`Vec<Arc<dyn Tool>>` through `AgentHarnessOptions` or by calling `set_tools`.
-Use `set_active_tools` when you want to register a broad tool set but expose
-only a subset during a turn.
+Core 不提供具体工具。可以通过 `AgentHarnessOptions` 传入
+`Vec<Arc<dyn Tool>>`，或者调用 `set_tools` 注册工具。
+如果希望注册一组较大的工具，但在某个 turn 中只暴露其中一部分，使用
+`set_active_tools`。
 
 ## Sessions
 
-Use `AgentHarness::new_in_memory` for tests and prototypes. Use
-`JsonlSessionRepo` plus `AgentHarness::with_session` when sessions should be
-persisted.
-
+测试和原型可以使用 `AgentHarness::new_in_memory`。如果 session 需要持久化，
+使用 `JsonlSessionRepo` 配合 `AgentHarness::with_session`。

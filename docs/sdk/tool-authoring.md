@@ -1,16 +1,16 @@
-# Tool Authoring
+# Tool 编写
 
-Tools are the only way core executes external actions. A tool implements the
-`Tool` trait from `llm-harness-types`.
+Tool 是 core 执行外部动作的唯一方式。一个 tool 需要实现
+`llm-harness-types` 中的 `Tool` trait。
 
-Core does not know what a tool does. It only needs:
+Core 不关心 tool 的具体业务行为。它只需要：
 
-- A stable name.
-- A description for the LLM tool definition.
-- A JSON schema for arguments.
-- An async `execute` implementation.
+- 稳定的名称。
+- 用于 LLM tool definition 的描述。
+- 参数的 JSON schema。
+- 一个异步的 `execute` 实现。
 
-## Minimal Tool
+## 最小 Tool
 
 ```rust
 use futures::future::BoxFuture;
@@ -72,21 +72,19 @@ impl Tool for EchoTool {
 
 ## ToolContext
 
-`ToolContext` provides:
+`ToolContext` 提供：
 
-- `env`: file system and shell abstraction.
-- `abort`: cancellation signal.
-- `tool_use_id`: ID from the LLM tool call.
-- `turn_index`: current turn number.
-- `assistant_message`: message that requested the tool call.
-- `update_tx`: optional stream of partial tool results.
+- `env`：文件系统和 shell 抽象。
+- `abort`：取消信号。
+- `tool_use_id`：来自 LLM tool call 的 ID。
+- `turn_index`：当前 turn 编号。
+- `assistant_message`：请求 tool call 的 assistant 消息。
+- `update_tx`：可选的增量 tool result 输出通道。
 
-Long-running tools should check `ctx.abort` and return `ToolError::Aborted`
-when cancellation is requested.
+长时间运行的 tool 应该检查 `ctx.abort`，并在收到取消请求时返回
+`ToolError::Aborted`。
 
 ## Execution Mode
 
-Tools are parallel by default. Override `execution_mode` and return
-`ToolExecutionMode::Sequential` when a tool must be a boundary in the tool batch
-schedule.
-
+Tools 默认并行执行。如果某个 tool 必须成为工具批次调度中的边界，可以覆盖
+`execution_mode`，并返回 `ToolExecutionMode::Sequential`。

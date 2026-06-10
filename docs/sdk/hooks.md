@@ -1,34 +1,31 @@
 # Hooks
 
-Hooks let callers customize behavior without changing core loop or harness
-logic. They are grouped by when they run and whether they can modify behavior.
+Hooks 允许调用方在不修改 core loop 或 harness 逻辑的情况下定制行为。
+它们按照运行时机以及是否能修改行为来分组。
 
 ## Harness Hooks
 
-`HarnessHooks` is the single configuration object for harness-level hooks. The
-harness builds a temporary `LoopConfig` from hooks and current state before each
-run.
+`HarnessHooks` 是 harness-level hooks 的统一配置对象。每次运行前，
+harness 会根据 hooks 和当前状态构建一个临时的 `LoopConfig`。
 
-Common hook categories:
+常见 hook 分类：
 
-- Run and turn hooks: observe or prepare lifecycle boundaries.
-- Context hooks: transform messages before they are sent to the provider.
-- Tool hooks: allow, modify, deny, or patch tool execution.
-- Provider hooks: observe or customize request-level behavior.
-- Compaction hooks: decide or prepare compaction behavior.
-- Stop hooks: decide whether the loop should continue.
+- Run 和 turn hooks：观察或准备生命周期边界。
+- Context hooks：在 messages 发送给 provider 前进行转换。
+- Tool hooks：允许、修改、拒绝或 patch tool execution。
+- Provider hooks：观察或定制 request-level 行为。
+- Compaction hooks：决定或准备 compaction 行为。
+- Stop hooks：决定 loop 是否继续。
 
-## Events vs Hooks
+## Events 与 Hooks
 
-Events are notifications. Subscribe to `AgentEvent` or `AgentHarnessEvent` when
-you need UI updates, logs, telemetry, or progress rendering.
+Events 是通知。当你需要 UI 更新、日志、telemetry 或进度渲染时，订阅
+`AgentEvent` 或 `AgentHarnessEvent`。
 
-Hooks are behavior controls. Use hooks when you need to modify context, tool
-arguments, tool results, or run decisions.
+Hooks 是行为控制点。当你需要修改 context、tool arguments、tool results 或运行决策时，
+使用 hooks。
 
-## Runtime Layers
+## Runtime 层
 
-A runtime or product layer can multiplex many plugins/extensions into the core
-hook set. Core intentionally exposes typed hook points but does not own a plugin
-runtime.
-
+Runtime 或产品层可以把多个 plugins/extensions 汇聚到 core 的 hook set 中。
+Core 只暴露类型化的 hook points，但不拥有 plugin runtime。

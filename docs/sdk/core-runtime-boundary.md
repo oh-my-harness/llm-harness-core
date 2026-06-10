@@ -1,40 +1,38 @@
-# Core / Runtime Boundary
+# Core / Runtime 边界
 
-`llm-harness-core` is the framework SDK. It owns how agents run.
+`llm-harness-core` 是框架 SDK，负责 Agent 如何运行。
 
-`llm-harness-runtime` is an upper layer. It should own shared product-runtime
-behavior such as common tools, config, auth, model registry, prompt assembly,
-auto retry, and auto compaction policy.
+`llm-harness-runtime` 是上层。它应该负责共享的产品运行时行为，例如通用 tools、
+config、auth、model registry、prompt assembly、auto retry 和 auto compaction policy。
 
-Domain agents own domain identity and product entrypoints.
+业务 Agent 负责自己的领域身份和产品入口。
 
-## Core Owns
+## Core 负责
 
-- Messages and content blocks.
-- `Tool` and `ExecutionEnv` contracts.
-- Streaming loop and tool scheduling.
-- `Agent` and `AgentHarness`.
-- Sessions, branches, context rebuilding.
-- Compaction primitives.
-- Skills and prompt templates.
-- Hooks and events.
+- Messages 和 content blocks。
+- `Tool` 和 `ExecutionEnv` contracts。
+- Streaming loop 和 tool scheduling。
+- `Agent` 和 `AgentHarness`。
+- Sessions、branches 和 context rebuilding。
+- Compaction primitives。
+- Skills 和 prompt templates。
+- Hooks 和 events。
 
-## Runtime Owns
+## Runtime 负责
 
-- Concrete tools such as read, bash, edit, write, grep, find, and ls.
-- Tool registry and active tool policy.
-- Settings, auth, and model registry.
-- System prompt builder.
-- Resource discovery and orchestration.
-- Retry policy and automatic compaction triggers.
-- Extension/plugin runtime.
+- 具体 tools，例如 read、bash、edit、write、grep、find 和 ls。
+- Tool registry 和 active tool policy。
+- Settings、auth 和 model registry。
+- System prompt builder。
+- Resource discovery 和 orchestration。
+- Retry policy 和 automatic compaction triggers。
+- Extension/plugin runtime。
 
-## Domain Agents Own
+## 业务 Agent 负责
 
-- Domain-specific tools.
-- Domain-specific system prompt identity.
-- Domain skills and templates.
-- CLI, TUI, HTTP, RPC, MCP, and product workflows.
+- 领域专用 tools。
+- 领域专用 system prompt identity。
+- 领域 skills 和 templates。
+- CLI、TUI、HTTP、RPC、MCP 和产品工作流。
 
-Core must not depend on runtime. Runtime depends on core.
-
+Core 不应该依赖 runtime。Runtime 依赖 core。

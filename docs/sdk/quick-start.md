@@ -1,13 +1,12 @@
-# Quick Start
+# 快速开始
 
-Use `Agent` when you need a lightweight stateful agent without persistent
-sessions, skills, compaction, or branch management. This path is useful for
-tests, prototypes, and simple scripts.
+当你需要一个轻量、有状态，但不需要持久化 session、skills、compaction 或
+branch 管理的 Agent 时，优先使用 `Agent`。这个入口适合测试、原型和简单脚本。
 
-`Agent` owns an in-memory message transcript. It emits `AgentEvent` values and
-uses the same `Tool` abstraction as the full harness.
+`Agent` 内部维护一份内存中的消息记录。它会发出 `AgentEvent`，并且使用和完整
+harness 相同的 `Tool` 抽象。
 
-## Minimal Shape
+## 最小形态
 
 ```rust
 use std::sync::Arc;
@@ -28,12 +27,11 @@ async fn run(client: Arc<dyn LlmClient>) -> anyhow::Result<()> {
 }
 ```
 
-The exact client construction depends on `llm-api-adapter`. Core accepts an
-`Arc<dyn LlmClient>` and does not own provider credential discovery.
+具体如何构造 client 取决于 `llm-api-adapter`。Core 只接收
+`Arc<dyn LlmClient>`，不负责 provider 凭证发现。
 
-## When To Use AgentHarness Instead
+## 什么时候改用 AgentHarness
 
-Use `AgentHarness` when you need durable sessions, branch operations,
-compaction, skills/templates, or harness hooks. For product-like agents with
-settings, auth, model registry, and common tools, build on a runtime layer above
-core.
+当你需要持久化 session、branch 操作、compaction、skills/templates 或
+harness hooks 时，使用 `AgentHarness`。如果要构建带 settings、auth、
+model registry 和通用 tools 的产品型 Agent，应当在 core 之上的 runtime 层继续封装。
