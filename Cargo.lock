@@ -750,6 +750,7 @@ dependencies = [
 [[package]]
 name = "llm_adapter"
 version = "0.1.0"
+source = "git+https://github.com/oh-my-harness/llm-api-adapter.git?rev=c1d2cb87cb2bb94803144cfc28133a394b7fca18#c1d2cb87cb2bb94803144cfc28133a394b7fca18"
 dependencies = [
  "async-trait",
  "eventsource-stream",
