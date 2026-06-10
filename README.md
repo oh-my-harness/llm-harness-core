@@ -79,6 +79,7 @@ target/doc/llm_harness/index.html
 
 ## Design Documents
 
+- SDK guides: `docs/sdk/README.md`
 - Core design: `docs/superpowers/specs/2026-06-07-llm-harness-core-design.md`
 - Core/runtime SDK boundary:
   `docs/superpowers/specs/2026-06-10-core-runtime-sdk-boundary-design.md`
