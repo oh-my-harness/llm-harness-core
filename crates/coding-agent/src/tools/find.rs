@@ -1,6 +1,9 @@
 use futures::future::BoxFuture;
+use globset::{GlobBuilder, GlobMatcher};
+use ignore::WalkBuilder;
 use llm_harness_types::*;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 
 /// Find files matching a glob pattern.
 pub struct FindTool {
@@ -61,33 +64,41 @@ async fn run_find(args: Value, ctx: &ToolContext) -> Result<ToolResult, ToolErro
         .as_str()
         .ok_or_else(|| ToolError::InvalidArguments("pattern required".into()))?;
     let search_path = args["path"].as_str().unwrap_or(".");
+    let root = resolve_path(search_path, ctx.env.working_dir());
+    if !root.exists() {
+        return Err(ToolError::Execution(format!(
+            "Path not found: {}",
+            root.display()
+        )));
+    }
 
-    // Use rg --files with --glob to find matching files (respects .gitignore).
-    let cmd = format!(
-        "rg --files --color=never --glob={} {} 2>/dev/null | sort | head -200",
-        shell_escape(pattern),
-        shell_escape(search_path),
-    );
+    let matcher = build_matcher(pattern)?;
+    let mut matches = Vec::new();
+    for entry in WalkBuilder::new(&root).build() {
+        if ctx.abort.is_cancelled() {
+            return Err(ToolError::Aborted);
+        }
 
-    let opts = ShellOptions {
-        cwd: Some(ctx.env.working_dir()),
-        env: vec![],
-        timeout: Some(std::time::Duration::from_secs(30)),
-        abort: ctx.abort.clone(),
-        on_stdout: None,
-        on_stderr: None,
-    };
+        let entry = entry.map_err(|e| ToolError::Execution(e.to_string()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
 
-    let output = ctx
-        .env
-        .execute_shell(&cmd, opts)
-        .await
-        .map_err(|e| ToolError::Execution(e.to_string()))?;
+        let relative = path.strip_prefix(&root).unwrap_or(path);
+        if matches_pattern(&matcher, pattern, relative) {
+            matches.push(to_posix_path(relative));
+            if matches.len() >= 200 {
+                break;
+            }
+        }
+    }
 
-    let text = if output.stdout.is_empty() {
+    matches.sort();
+    let text = if matches.is_empty() {
         "No files found.".to_string()
     } else {
-        output.stdout.trim_end().to_string()
+        matches.join("\n")
     };
 
     Ok(ToolResult {
@@ -97,8 +108,43 @@ async fn run_find(args: Value, ctx: &ToolContext) -> Result<ToolResult, ToolErro
     })
 }
 
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+fn build_matcher(pattern: &str) -> Result<GlobMatcher, ToolError> {
+    GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map(|glob| glob.compile_matcher())
+        .map_err(|e| ToolError::InvalidArguments(format!("invalid glob pattern: {e}")))
+}
+
+fn matches_pattern(matcher: &GlobMatcher, pattern: &str, relative: &Path) -> bool {
+    let relative_posix = to_posix_path(relative);
+    if matcher.is_match(&relative_posix) {
+        return true;
+    }
+
+    if !pattern.contains('/') && !pattern.contains('\\') {
+        if let Some(name) = relative.file_name().and_then(|n| n.to_str()) {
+            return matcher.is_match(name);
+        }
+    }
+
+    false
+}
+
+fn resolve_path(path: &str, cwd: &Path) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    }
+}
+
+fn to_posix_path(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

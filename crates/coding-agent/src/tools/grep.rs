@@ -1,8 +1,12 @@
 use futures::future::BoxFuture;
+use globset::{GlobBuilder, GlobMatcher};
+use ignore::WalkBuilder;
 use llm_harness_types::*;
+use regex::RegexBuilder;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 
-/// Search for a regex pattern in files using ripgrep (falls back to grep).
+/// Search for a regex pattern in files.
 pub struct GrepTool {
     schema: Value,
 }
@@ -48,8 +52,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &str {
-        "Search for a regex pattern in files using ripgrep. \
-         Respects .gitignore. Use include to filter by file type."
+        "Search for a regex pattern in files. Respects .gitignore. Use include to filter by file type."
     }
 
     fn parameters_schema(&self) -> &Value {
@@ -74,29 +77,59 @@ async fn run_grep(args: Value, ctx: &ToolContext) -> Result<ToolResult, ToolErro
     let include = args["include"].as_str();
     let context_lines = args["context"].as_u64().unwrap_or(0);
 
-    // Build rg command; fall back to grep if rg not found.
-    let cmd = build_grep_command(pattern, search_path, include, context_lines);
+    let root = resolve_path(search_path, ctx.env.working_dir());
+    if !root.exists() {
+        return Err(ToolError::Execution(format!(
+            "Path not found: {}",
+            root.display()
+        )));
+    }
 
-    let opts = ShellOptions {
-        cwd: Some(ctx.env.working_dir()),
-        env: vec![],
-        timeout: Some(std::time::Duration::from_secs(30)),
-        abort: ctx.abort.clone(),
-        on_stdout: None,
-        on_stderr: None,
-    };
+    let regex = RegexBuilder::new(pattern)
+        .build()
+        .map_err(|e| ToolError::InvalidArguments(format!("invalid regex pattern: {e}")))?;
+    let include_matcher = include.map(build_glob_matcher).transpose()?;
+    let files = collect_search_files(&root, include_matcher.as_ref(), ctx)?;
 
-    let output = ctx
-        .env
-        .execute_shell(&cmd, opts)
-        .await
-        .map_err(|e| ToolError::Execution(e.to_string()))?;
+    let mut output_lines = Vec::new();
+    for file in files {
+        if ctx.abort.is_cancelled() {
+            return Err(ToolError::Aborted);
+        }
 
-    // rg exits 1 when no matches — that's not an error.
-    let text = if output.stdout.is_empty() && output.exit_code != 0 {
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            if !regex.is_match(line) {
+                continue;
+            }
+
+            let line_no = idx + 1;
+            let start = line_no.saturating_sub(context_lines as usize).max(1);
+            let end = (line_no + context_lines as usize).min(lines.len());
+            let display_path = display_path(&file, &root);
+
+            for current in start..=end {
+                let sep = if current == line_no { ":" } else { "-" };
+                output_lines.push(format!(
+                    "{}{}{}{} {}",
+                    display_path,
+                    sep,
+                    current,
+                    sep,
+                    lines[current - 1]
+                ));
+            }
+        }
+    }
+
+    let text = if output_lines.is_empty() {
         "No matches found.".to_string()
     } else {
-        output.stdout
+        output_lines.join("\n")
     };
 
     Ok(ToolResult {
@@ -106,32 +139,88 @@ async fn run_grep(args: Value, ctx: &ToolContext) -> Result<ToolResult, ToolErro
     })
 }
 
-fn build_grep_command(
-    pattern: &str,
-    path: &str,
-    include: Option<&str>,
-    context_lines: u64,
-) -> String {
-    let mut parts = vec!["rg".to_string(), "--color=never".to_string()];
-
-    if context_lines > 0 {
-        parts.push(format!("-C{}", context_lines));
+fn collect_search_files(
+    root: &Path,
+    include: Option<&GlobMatcher>,
+    ctx: &ToolContext,
+) -> Result<Vec<PathBuf>, ToolError> {
+    if root.is_file() {
+        return Ok(vec![root.to_path_buf()]);
+    }
+    if !root.is_dir() {
+        return Err(ToolError::Execution(format!(
+            "Not a file or directory: {}",
+            root.display()
+        )));
     }
 
-    if let Some(glob) = include {
-        parts.push(format!("--glob={}", shell_escape(glob)));
+    let mut files = Vec::new();
+    for entry in WalkBuilder::new(root).build() {
+        if ctx.abort.is_cancelled() {
+            return Err(ToolError::Aborted);
+        }
+
+        let entry = entry.map_err(|e| ToolError::Execution(e.to_string()))?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        if include.is_none_or(|matcher| matches_glob(matcher, relative)) {
+            files.push(path.to_path_buf());
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn build_glob_matcher(pattern: &str) -> Result<GlobMatcher, ToolError> {
+    GlobBuilder::new(pattern)
+        .literal_separator(true)
+        .build()
+        .map(|glob| glob.compile_matcher())
+        .map_err(|e| ToolError::InvalidArguments(format!("invalid include glob: {e}")))
+}
+
+fn matches_glob(matcher: &GlobMatcher, relative: &Path) -> bool {
+    let relative_posix = to_posix_path(relative);
+    if matcher.is_match(&relative_posix) {
+        return true;
     }
 
-    parts.push(shell_escape(pattern));
-    parts.push(shell_escape(path));
-    parts.join(" ")
+    relative
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| matcher.is_match(name))
 }
 
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
+fn resolve_path(path: &str, cwd: &Path) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+fn display_path(path: &Path, root: &Path) -> String {
+    if root.is_dir() {
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        to_posix_path(relative)
+    } else {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string())
+    }
+}
+
+fn to_posix_path(path: &Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 #[cfg(test)]
 mod tests {
@@ -164,18 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn build_command_basic() {
-        let cmd = build_grep_command("fn main", "src/", None, 0);
-        assert!(cmd.contains("rg"), "got: {}", cmd);
-        assert!(cmd.contains("fn main"), "got: {}", cmd);
-        assert!(cmd.contains("src/"), "got: {}", cmd);
-    }
-
-    #[test]
-    fn build_command_with_context_and_include() {
-        let cmd = build_grep_command("TODO", ".", Some("*.rs"), 2);
-        assert!(cmd.contains("-C2"), "got: {}", cmd);
-        assert!(cmd.contains("*.rs"), "got: {}", cmd);
+    fn include_glob_matches_basename() {
+        let matcher = build_glob_matcher("*.rs").unwrap();
+        assert!(matches_glob(&matcher, Path::new("src/main.rs")));
+        assert!(!matches_glob(&matcher, Path::new("README.md")));
     }
 
     #[tokio::test]

@@ -19,6 +19,42 @@ impl OsEnv {
     }
 }
 
+fn resolve_shell() -> Result<(PathBuf, &'static str), EnvError> {
+    #[cfg(windows)]
+    {
+        if let Some(path) = std::env::var_os("CODING_AGENT_SHELL") {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                return Ok((path, "-lc"));
+            }
+        }
+
+        let git_bash = PathBuf::from(r"C:\Program Files\Git\bin\bash.exe");
+        if git_bash.is_file() {
+            return Ok((git_bash, "-lc"));
+        }
+
+        Ok((PathBuf::from("bash.exe"), "-lc"))
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(path) = std::env::var_os("SHELL") {
+            let path = PathBuf::from(path);
+            if path.is_file() {
+                return Ok((path, "-lc"));
+            }
+        }
+
+        let bash = PathBuf::from("/bin/bash");
+        if bash.is_file() {
+            return Ok((bash, "-lc"));
+        }
+
+        Ok((PathBuf::from("sh"), "-c"))
+    }
+}
+
 impl ExecutionEnv for OsEnv {
     fn working_dir(&self) -> &Path {
         &self.working_dir
@@ -290,12 +326,22 @@ impl ExecutionEnv for OsEnv {
 
         Box::pin(async move {
             let run = async {
-                let mut command = tokio::process::Command::new("sh");
-                command.arg("-c").arg(&cmd).current_dir(&cwd);
+                let (shell, flag) = resolve_shell()?;
+                let mut command = tokio::process::Command::new(shell);
+                command.arg(flag).arg(&cmd).current_dir(&cwd);
                 for (k, v) in &env_vars {
                     command.env(k, v);
                 }
-                let output = command.output().await.map_err(EnvError::Io)?;
+                let output = command.output().await.map_err(|e| {
+                    if cfg!(windows) && e.kind() == std::io::ErrorKind::NotFound {
+                        EnvError::Other(
+                            "bash shell not found; install Git for Windows or set CODING_AGENT_SHELL"
+                                .into(),
+                        )
+                    } else {
+                        EnvError::Io(e)
+                    }
+                })?;
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let exit_code = output.status.code().unwrap_or(-1);
