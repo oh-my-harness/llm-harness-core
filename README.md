@@ -1,68 +1,63 @@
 # llm-harness-core
 
-Rust workspace for building LLM agent frameworks. The project separates shared
-agent types, the streaming loop, and the session-backed harness layer.
+用于构建 LLM Agent 框架的 Rust workspace。项目将共享 Agent 类型、流式
+loop，以及带 session 的 harness 层分离开来。
 
-`llm-harness-core` is a framework SDK, not a concrete agent product. It defines
-how agents run; concrete tools, product prompts, settings/auth management, CLI,
-TUI, HTTP, RPC, MCP, and packaging live in upper layers such as
-`llm-harness-runtime` or domain-agent repositories.
+`llm-harness-core` 是框架 SDK，不是具体的 Agent 产品。它定义 Agent
+如何运行；具体工具、产品提示词、settings/auth 管理、CLI、TUI、HTTP、RPC、
+MCP 和打包能力属于上层，例如 `llm-harness-runtime` 或具体业务 Agent 仓库。
 
-## Workspace Layout
+## Workspace 结构
 
 ```text
 crates/
-  llm-harness-types   Shared messages, events, Tool, ExecutionEnv, hooks
-  llm-harness-loop    Streaming agent loop and adapter bridge
-  llm-harness         Agent, AgentHarness, sessions, compaction, skills
+  llm-harness-types   共享 messages、events、Tool、ExecutionEnv、hooks
+  llm-harness-loop    流式 Agent loop 和 adapter bridge
+  llm-harness         Agent、AgentHarness、sessions、compaction、skills
 ```
 
-The LLM provider layer is supplied by `llm_adapter` from:
+LLM provider 层由 `llm_adapter` 提供，来源：
 
 ```text
 https://github.com/oh-my-harness/llm-api-adapter.git
 ```
 
-The dependency is pinned by commit in `Cargo.toml` and `Cargo.lock` for
-reproducible builds.
+该依赖在 `Cargo.toml` 和 `Cargo.lock` 中固定到具体 commit，以保证构建可复现。
 
-## What Belongs Here
+## Core 包含什么
 
-- Message and content model.
-- Tool and execution environment abstractions.
-- Streaming LLM loop and tool scheduling.
-- `Agent` for lightweight stateful runs.
-- `AgentHarness` for session-backed agents.
-- Session storage, branches, context rebuilding, compaction, skills, and hooks.
+- Message 和 content model。
+- Tool 和 execution environment 抽象。
+- 流式 LLM loop 和 tool 调度。
+- 用于轻量有状态运行的 `Agent`。
+- 用于 session-backed Agent 的 `AgentHarness`。
+- Session storage、branches、context rebuilding、compaction、skills 和 hooks。
 
-## What Does Not Belong Here
+## Core 不包含什么
 
-- Concrete tools such as read, bash, edit, write, grep, find, or ls.
-- Tool registry policy, settings, auth storage, or model registry.
-- Product system prompts.
-- CLI, TUI, HTTP, RPC, MCP, or product packaging.
-- Domain-specific tools or resources.
+- 具体工具，例如 read、bash、edit、write、grep、find 或 ls。
+- Tool registry policy、settings、auth storage 或 model registry。
+- 产品 system prompts。
+- CLI、TUI、HTTP、RPC、MCP 或产品打包。
+- 业务领域特定 tools 或 resources。
 
-Those responsibilities belong in `llm-harness-runtime` or concrete agent
-repositories.
+这些职责属于 `llm-harness-runtime` 或具体 Agent 仓库。
 
-## Recommended Usage Paths
+## 推荐使用路径
 
-- Use `Agent` for lightweight scripts, tests, and prototypes that do not need
-  persistent sessions.
-- Use `AgentHarness` for real agents that need sessions, hooks, skills,
-  compaction, events, and branch operations.
-- Use `agent_loop` directly only for advanced framework integrations or custom
-  runtimes.
-- Use `llm-harness-runtime` when you want a batteries-included application
-  runtime with common tools, settings, auth, model registry, and prompt assembly.
+- 如果不需要持久化 session，用 `Agent` 构建轻量脚本、测试和原型。
+- 如果需要 sessions、hooks、skills、compaction、events 和 branch 操作，用
+  `AgentHarness` 构建真实 Agent。
+- 只有在高级框架集成或自定义 runtime 场景中，才直接使用 `agent_loop`。
+- 如果需要带通用 tools、settings、auth、model registry 和 prompt assembly 的
+  应用 runtime，使用 `llm-harness-runtime`。
 
-## Requirements
+## 环境要求
 
-- Rust toolchain with edition 2024 support.
-- Network access for first-time Cargo dependency fetches.
+- 支持 Rust 2024 edition 的 Rust toolchain。
+- 首次拉取 Cargo 依赖时需要网络访问。
 
-## Build, Test, And Docs
+## 构建、测试和文档
 
 ```powershell
 cargo check --workspace
@@ -71,25 +66,25 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 ```
 
-Generated API docs are written under:
+生成的 API 文档位于：
 
 ```text
 target/doc/llm_harness/index.html
 ```
 
-## Design Documents
+## 设计文档
 
-- SDK guides: `docs/sdk/README.md`
-- Core design: `docs/superpowers/specs/2026-06-07-llm-harness-core-design.md`
-- Core/runtime SDK boundary:
+- SDK 指南：`docs/sdk/README.md`
+- Core 设计：`docs/superpowers/specs/2026-06-07-llm-harness-core-design.md`
+- Core/runtime SDK 边界：
   `docs/superpowers/specs/2026-06-10-core-runtime-sdk-boundary-design.md`
-- Implementation plan:
+- 实现计划：
   `docs/superpowers/plans/2026-06-10-core-sdk-boundary.md`
 
-## Line Endings
+## 换行符
 
-The repository uses `.gitattributes` to keep Rust, TOML, Markdown, and
-`Cargo.lock` files on LF line endings. Recommended local Git settings:
+仓库使用 `.gitattributes` 保持 Rust、TOML、Markdown 和 `Cargo.lock` 文件为
+LF 换行。推荐的本地 Git 设置：
 
 ```powershell
 git config core.autocrlf false

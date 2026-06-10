@@ -2,7 +2,7 @@
 //!
 //! This crate exposes the user-facing core runtime: `Agent` for lightweight
 //! stateful runs, `AgentHarness` for session-backed agents, session
-//! repositories, compaction, skills/templates, and `OsEnv`.
+//! repositories, compaction, and skills/templates.
 //!
 //! Concrete tools, settings/auth/model registries, product prompts, CLI/TUI
 //! entrypoints, and extension runtimes belong above core, for example in
@@ -12,12 +12,8 @@
 
 pub mod agent;
 pub mod compaction;
-/// ExecutionEnv implementations.
-///
-/// Currently only provides [`OsEnv`] for test use.
-/// Production code injects its own `Arc<dyn ExecutionEnv>` into [`AgentHarness`].
 #[cfg(test)]
-pub mod env;
+mod env;
 pub mod harness;
 pub mod session;
 pub mod skills;
@@ -47,8 +43,8 @@ pub mod prelude {
     pub use crate::{
         Agent, AgentHarness, AgentHarnessEvent, AgentHarnessOptions, AgentOptions, AgentPhase,
         AgentState, BuiltContext, CompactionPreparation, CompactionSettings, CompactionStats,
-        InMemorySessionRepo, JsonlSessionRepo, ModelInfo, OsEnv, PromptTemplate, Session,
-        SessionRepo, SessionStorage, Skill, SkillDiagnostic, SourcedSkill,
+        InMemorySessionRepo, JsonlSessionRepo, ModelInfo, PromptTemplate, Session, SessionRepo,
+        SessionStorage, Skill, SkillDiagnostic, SourcedSkill,
     };
     pub use llm_harness_types::{
         AgentError, AgentEvent, AgentMessage, AssistantMessage, AuthHook, BranchSummaryMessage,

@@ -17,13 +17,10 @@
 ```rust
 use std::sync::Arc;
 
-use llm_harness::{AgentHarness, AgentHarnessOptions, OsEnv};
+use llm_harness::prelude::{AgentHarness, AgentHarnessOptions, ExecutionEnv};
 use llm_harness_loop::LlmClient;
 
-async fn run(client: Arc<dyn LlmClient>) -> anyhow::Result<()> {
-    let cwd = std::env::current_dir()?;
-    let env = Arc::new(OsEnv::new(cwd));
-
+async fn run(client: Arc<dyn LlmClient>, env: Arc<dyn ExecutionEnv>) -> anyhow::Result<()> {
     let mut opts = AgentHarnessOptions::new("my-model");
     opts.system_prompt = Some("You are a helpful assistant.".into());
 
@@ -47,6 +44,9 @@ Core 不提供具体工具。可以通过 `AgentHarnessOptions` 传入
 `Vec<Arc<dyn Tool>>`，或者调用 `set_tools` 注册工具。
 如果希望注册一组较大的工具，但在某个 turn 中只暴露其中一部分，使用
 `set_active_tools`。
+
+Core 也不提供真实 OS 环境。文件系统、shell、权限、sandbox 和工作目录策略由
+runtime 层实现 `ExecutionEnv` 后注入。
 
 ## Sessions
 
