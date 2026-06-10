@@ -1,5 +1,10 @@
 pub mod agent;
 pub mod compaction;
+/// ExecutionEnv implementations.
+///
+/// Currently only provides [`OsEnv`] for test use.
+/// Production code injects its own `Arc<dyn ExecutionEnv>` into [`AgentHarness`].
+#[cfg(test)]
 pub mod env;
 pub mod harness;
 pub mod session;
@@ -7,7 +12,6 @@ pub mod skills;
 
 pub use agent::{Agent, AgentOptions, AgentPhase, AgentState, ModelInfo};
 pub use compaction::{CompactionPreparation, CompactionSettings, compact, prepare_compaction};
-pub use env::OsEnv;
 pub use harness::{
     AgentHarness, AgentHarnessEvent, AgentHarnessOptions, CompactionStats, HarnessHooks,
     HarnessState, HarnessToolCallResult,
