@@ -1,3 +1,15 @@
+//! Primary framework SDK facade for `llm-harness-core`.
+//!
+//! This crate exposes the user-facing core runtime: `Agent` for lightweight
+//! stateful runs, `AgentHarness` for session-backed agents, session
+//! repositories, compaction, skills/templates, and `OsEnv`.
+//!
+//! Concrete tools, settings/auth/model registries, product prompts, CLI/TUI
+//! entrypoints, and extension runtimes belong above core, for example in
+//! `llm-harness-runtime` or a domain-agent repository.
+//!
+//! For common imports, use [`prelude`].
+
 pub mod agent;
 pub mod compaction;
 /// ExecutionEnv implementations.

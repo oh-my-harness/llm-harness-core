@@ -1,3 +1,13 @@
+//! Advanced streaming loop API for `llm-harness-core`.
+//!
+//! This crate owns the stateless LLM loop: converting harness messages to
+//! provider requests, consuming streaming responses, dispatching tool calls, and
+//! emitting `AgentEvent` values.
+//!
+//! Most SDK users should start with `llm_harness::Agent` or
+//! `llm_harness::AgentHarness`. Use this crate directly when building a custom
+//! runtime, testing loop behavior, or integrating at the framework layer.
+
 pub mod config;
 pub mod convert;
 pub mod dispatch;
