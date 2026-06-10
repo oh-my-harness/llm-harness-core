@@ -24,3 +24,25 @@ pub use skills::{
     format_skills_for_system_prompt, invoke_template, load_prompt_templates, load_skills,
     load_sourced_skills, parse_command_args,
 };
+
+/// Recommended imports for most `llm-harness` SDK users.
+///
+/// This module intentionally exposes the stable framework surface: `Agent`,
+/// `AgentHarness`, sessions, tools, messages, events, hooks, skills, and the
+/// default OS execution environment. Advanced loop APIs and direct adapter
+/// types are not included here.
+pub mod prelude {
+    pub use crate::{
+        Agent, AgentHarness, AgentHarnessEvent, AgentHarnessOptions, AgentOptions, AgentPhase,
+        AgentState, BuiltContext, CompactionPreparation, CompactionSettings, CompactionStats,
+        InMemorySessionRepo, JsonlSessionRepo, ModelInfo, OsEnv, PromptTemplate, Session,
+        SessionRepo, SessionStorage, Skill, SkillDiagnostic, SourcedSkill,
+    };
+    pub use llm_harness_types::{
+        AgentError, AgentEvent, AgentMessage, AssistantMessage, AuthHook, BranchSummaryMessage,
+        CompactionError, CompactionSummaryMessage, ContentBlock, DiagnosticLevel, EntryId,
+        EnvError, ExecutionEnv, HarnessError, HarnessPhase, ImageSource, ShellOptions,
+        ShellOutput, StopReason, StreamOptions, ThinkingLevel, TokenUsage, Tool, ToolContext,
+        ToolError, ToolExecutionMode, ToolResult, UserMessage,
+    };
+}
