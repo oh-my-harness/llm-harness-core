@@ -215,6 +215,8 @@ struct HarnessInner {
     retry: Option<RetryConfig>,
     compaction_reserve_tokens: Option<u32>,
     compaction_keep_recent_tokens: Option<u32>,
+    /// Maps tool_use_id → tool_name for in-flight tool calls.
+    active_tool_names: std::collections::HashMap<String, String>,
 }
 
 impl HarnessInner {
@@ -440,6 +442,7 @@ impl AgentHarness {
             retry: opts.retry,
             compaction_reserve_tokens: opts.compaction_reserve_tokens,
             compaction_keep_recent_tokens: opts.compaction_keep_recent_tokens,
+            active_tool_names: std::collections::HashMap::new(),
         };
 
         let convert_to_llm: Arc<dyn ConvertToLlmHook> = opts
@@ -1209,9 +1212,10 @@ impl AgentHarness {
             let mut inner = self.inner.lock().unwrap();
             inner.state.streaming_message = None;
             inner.state.pending_tool_calls.clear();
+            inner.active_tool_names.clear();
             inner.current_abort = None;
-            if result.is_err() {
-                inner.state.error_message = Some(result.as_ref().unwrap_err().to_string());
+            if let Err(ref e) = result {
+                inner.state.error_message = Some(e.to_string());
                 inner.state.pending_session_writes.clear();
             }
         }
@@ -1290,12 +1294,13 @@ impl AgentHarness {
                     tool_name,
                     args,
                 } => {
-                    self.inner
-                        .lock()
-                        .unwrap()
-                        .state
-                        .pending_tool_calls
-                        .insert(tool_use_id.clone());
+                    {
+                        let mut inner = self.inner.lock().unwrap();
+                        inner.state.pending_tool_calls.insert(tool_use_id.clone());
+                        inner
+                            .active_tool_names
+                            .insert(tool_use_id.clone(), tool_name.clone());
+                    }
                     self.emit(AgentHarnessEvent::ToolCallStart {
                         tool_use_id: tool_use_id.clone(),
                         tool_name: tool_name.clone(),
@@ -1338,9 +1343,16 @@ impl AgentHarness {
                         Ok(r) => r.details.clone(),
                         Err(_) => serde_json::Value::Null,
                     };
+                    let resolved_name = self
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .active_tool_names
+                        .remove(tool_use_id.as_str())
+                        .unwrap_or_default();
                     self.emit(AgentHarnessEvent::ToolCallEnd {
                         tool_use_id: tool_use_id.clone(),
-                        tool_name: String::new(), // name not in ToolExecutionEnd
+                        tool_name: resolved_name,
                         result: HarnessToolCallResult {
                             content,
                             details,
@@ -1786,5 +1798,82 @@ mod tests {
         h.next_turn("msg");
         h.clear_all_queues();
         assert!(!h.has_queued_messages());
+    }
+
+    struct DummyTool {
+        name: String,
+        schema: serde_json::Value,
+    }
+    impl DummyTool {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_owned(),
+                schema: serde_json::json!({"type":"object","properties":{}}),
+            }
+        }
+    }
+    impl llm_harness_types::Tool for DummyTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "test tool"
+        }
+        fn parameters_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        fn execute<'a>(
+            &'a self,
+            _args: serde_json::Value,
+            _ctx: &'a llm_harness_types::ToolContext,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<llm_harness_types::ToolResult, llm_harness_types::ToolError>,
+        > {
+            Box::pin(async {
+                Ok(llm_harness_types::ToolResult {
+                    content: vec![llm_harness_types::ContentBlock::Text {
+                        text: "ok".to_string(),
+                    }],
+                    details: serde_json::Value::Null,
+                    terminate: false,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_end_event_carries_tool_name() {
+        use std::sync::Mutex as StdMutex;
+
+        let h = make_harness(vec![
+            MockResponse::tool_use("id-1", "my_tool", "{}"),
+            MockResponse::text("done"),
+        ]);
+
+        let tool: Arc<dyn llm_harness_types::Tool> = Arc::new(DummyTool::new("my_tool"));
+        h.set_tools(vec![tool]).await.unwrap();
+
+        let received_name: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let received_name_clone = received_name.clone();
+
+        let mut rx = h.subscribe();
+        let handle = tokio::spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                if let AgentHarnessEvent::ToolCallEnd { tool_name, .. } = event.as_ref() {
+                    *received_name_clone.lock().unwrap() = Some(tool_name.clone());
+                    break;
+                }
+            }
+        });
+
+        h.prompt("use tool").await.unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(
+            received_name.lock().unwrap().as_deref(),
+            Some("my_tool"),
+            "ToolCallEnd must carry the correct tool_name"
+        );
     }
 }
