@@ -285,17 +285,18 @@ impl Agent {
 
     /// Drain the steer queue.
     pub fn clear_steering_queue(&self) {
-        let inner = self.inner.lock().unwrap();
-        // Drain by creating a fresh channel — old receiver already moved to loop or dropped.
-        // try_send failures on the old Sender are silently ignored.
-        drop(inner);
-        // We can't drain mpsc::Sender directly; the receiver in the loop handles it.
-        // Nothing more needed here — a new channel is created on next prompt().
+        let mut inner = self.inner.lock().unwrap();
+        let cap = inner.queue_capacity;
+        let (new_tx, _) = mpsc::channel(cap);
+        inner.steer_tx = new_tx;
     }
 
     /// Drain the follow-up queue.
     pub fn clear_follow_up_queue(&self) {
-        // Same rationale as clear_steering_queue.
+        let mut inner = self.inner.lock().unwrap();
+        let cap = inner.queue_capacity;
+        let (new_tx, _) = mpsc::channel(cap);
+        inner.follow_up_tx = new_tx;
     }
 
     /// Drain both queues.
@@ -597,5 +598,32 @@ mod tests {
         let state = agent.state();
         // The loop adds new assistant message on top; original 2 + 1 new assistant = 3
         assert!(state.messages.len() >= 2);
+    }
+
+    #[tokio::test]
+    async fn clear_steering_queue_drains_pending_messages() {
+        let agent = make_agent(vec![MockResponse::text("response")]);
+
+        // Enqueue a steer message while Idle
+        agent.steer_message(AgentMessage::User(UserMessage {
+            content: vec![ContentBlock::Text {
+                text: "ignored message".into(),
+            }],
+            timestamp: chrono::Utc::now(),
+        }));
+
+        // Clear before prompting
+        agent.clear_steering_queue();
+
+        // Prompt with a fresh message
+        agent.prompt("actual prompt").await.unwrap();
+
+        let state = agent.state();
+        // Messages: [user("actual prompt"), assistant("response")] = 2
+        assert_eq!(
+            state.messages.len(),
+            2,
+            "steer message should have been cleared"
+        );
     }
 }
