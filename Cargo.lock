@@ -143,6 +143,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "deepseek-agent-example"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "llm-harness",
+ "llm-harness-loop",
+ "llm_adapter",
+ "tokio",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -707,7 +718,6 @@ dependencies = [
  "futures",
  "llm-harness-loop",
  "llm-harness-types",
- "llm_adapter",
  "serde",
  "serde_json",
  "tempfile",

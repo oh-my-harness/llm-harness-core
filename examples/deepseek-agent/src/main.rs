@@ -4,7 +4,7 @@
 //!
 //! ```powershell
 //! $env:DEEPSEEK_API_KEY="sk-..."
-//! cargo run -p llm-harness --example deepseek_agent
+//! cargo run -p deepseek-agent-example
 //! ```
 //!
 //! Optional environment variables:
@@ -94,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
         if prompt.eq_ignore_ascii_case("exit") || prompt.eq_ignore_ascii_case("quit") {
             break;
         }
-        
+
         run_turn(&agent, &mut events, prompt).await?;
     }
 

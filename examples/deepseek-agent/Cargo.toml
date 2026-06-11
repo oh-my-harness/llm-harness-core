@@ -1,0 +1,13 @@
+[package]
+name = "deepseek-agent-example"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+llm_adapter.workspace = true
+llm-harness = { path = "../../crates/llm-harness" }
+llm-harness-loop.workspace = true
+tokio = { workspace = true, features = ["full"] }

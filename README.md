@@ -78,7 +78,7 @@ target/doc/llm_harness/index.html
 
 ```powershell
 $env:DEEPSEEK_API_KEY="sk-..."
-cargo run -p llm-harness --example deepseek_agent
+cargo run -p deepseek-agent-example
 ```
 
 可选配置：
@@ -93,7 +93,7 @@ $env:LLM_HARNESS_PROMPT="Say hello from llm-harness."
 启动后输入消息并回车；输入 `exit` 或 `quit` 退出。
 
 更多说明见
-`crates/llm-harness/examples/deepseek_agent.md`。
+`examples/deepseek-agent/README.md`。
 
 ## 设计文档
 

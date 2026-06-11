@@ -33,7 +33,7 @@ jobs:
         run: cargo check --workspace
 
       - name: Check examples
-        run: cargo check --workspace --examples
+        run: cargo check -p deepseek-agent-example
 
       - name: Test workspace
         run: cargo test --workspace --features test-utils

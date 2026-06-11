@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/llm-harness-types", "crates/llm-harness-loop", "crates/llm-harness"]
+members = [
+    "crates/llm-harness-types",
+    "crates/llm-harness-loop",
+    "crates/llm-harness",
+    "examples/deepseek-agent",
+]
 resolver = "2"
 
 [workspace.package]
