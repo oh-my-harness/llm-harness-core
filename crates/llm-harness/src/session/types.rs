@@ -12,8 +12,11 @@ pub enum SessionEntryPayload {
     Message(AgentMessage),
     /// Model configuration change; replays via `build_context` to restore last model.
     ModelChange {
+        /// Display name of the model (e.g., "gpt-4", "claude-3-opus").
         to: String,
+        /// Provider name (e.g., "openai", "anthropic") if available.
         provider: Option<String>,
+        /// Full model identifier (e.g., "gpt-4-0125-preview") if available.
         model_id: Option<String>,
     },
     /// Thinking-level change.
@@ -23,25 +26,37 @@ pub enum SessionEntryPayload {
     /// A compaction event: summary message + first kept entry reference.
     Compaction(CompactionEntry),
     /// A named label marking an interesting point in the tree (for navigation).
-    Label { name: String },
+    Label {
+        /// Human-readable label name for this checkpoint.
+        name: String,
+    },
     /// A session naming event; latest one wins.
-    SessionInfo { name: String },
+    SessionInfo {
+        /// Human-readable name assigned to this session.
+        name: String,
+    },
     /// Application-layer custom entry.
     Custom {
         /// Application-defined sub-type tag.
         #[serde(rename = "type")]
         custom_type: String,
+        /// Arbitrary application-defined data (any JSON-serializable value).
         data: serde_json::Value,
     },
     /// Semantic annotation that a branch was created here (optional; for UI).
     BranchPoint {
+        /// The parent entry ID where the branch diverged.
         from: EntryId,
+        /// Optional label for this branch point.
         label: Option<String>,
     },
     /// Records a cursor switch between two branches.
     BranchSwitch {
+        /// The previous branch's leaf entry ID.
         from: EntryId,
+        /// The new branch's leaf entry ID.
         to: EntryId,
+        /// Optional human-provided summary of why this switch occurred.
         summary: Option<String>,
     },
     /// AI-generated summary of a branch.
@@ -117,34 +132,47 @@ pub struct SessionMetadata {
 /// Options for creating a new session.
 #[derive(Debug, Default)]
 pub struct CreateSessionOptions {
+    /// Human-readable name for the session (optional; can be set later via SessionInfo entry).
     pub name: Option<String>,
+    /// Initial LLM model to use (optional; defaults to harness configuration).
     pub initial_model: Option<String>,
+    /// Initial thinking level for the session (optional; defaults to disabled).
     pub initial_thinking_level: Option<ThinkingLevel>,
+    /// List of tool identifiers initially available in this session.
     pub initial_tools: Vec<String>,
 }
 
 /// Options for listing sessions.
 #[derive(Debug, Default)]
 pub struct ListSessionOptions {
+    /// Maximum number of sessions to return (None = no limit).
     pub limit: Option<usize>,
+    /// Number of sessions to skip from the start (for pagination).
     pub offset: Option<usize>,
+    /// Sort order for the results.
     pub order: ListOrder,
+    /// Filter sessions by name substring (case-insensitive).
     pub name_contains: Option<String>,
 }
 
 /// Sort order for session listings.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ListOrder {
+    /// Sort by last modification time, most recent first.
     #[default]
     UpdatedDesc,
+    /// Sort by last modification time, oldest first.
     UpdatedAsc,
+    /// Sort by creation time, most recent first.
     CreatedDesc,
+    /// Sort by creation time, oldest first.
     CreatedAsc,
 }
 
 /// Options for cross-session fork.
 #[derive(Debug)]
 pub struct ForkOptions {
+    /// Optional name for the forked session; uses parent name if not provided.
     pub name: Option<String>,
     /// v1 forces this to `true` (full entry copy with new IDs).
     pub copy_entries: bool,
@@ -199,16 +227,27 @@ pub struct BuiltContext {
 /// Discriminant for `find_entries_by_type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionEntryKind {
+    /// An agent message (user, assistant, tool-result, etc.).
     Message,
+    /// A model configuration change.
     ModelChange,
+    /// A thinking-level change.
     ThinkingLevelChange,
+    /// An active tools list change.
     ActiveToolsChange,
+    /// A compaction event.
     Compaction,
+    /// A named label entry.
     Label,
+    /// A session naming event.
     SessionInfo,
+    /// An application-layer custom entry.
     Custom,
+    /// A branch point annotation.
     BranchPoint,
+    /// A branch switch record.
     BranchSwitch,
+    /// An AI-generated branch summary.
     BranchSummary,
 }
 
