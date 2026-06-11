@@ -1478,7 +1478,10 @@ impl AgentHarness {
         // BeforeCompactDecision::Override can bypass the token-threshold check entirely.
         if let Some(ref h) = self.hooks.before_compact {
             let built = self.session.build_context().await?;
-            let estimated_tokens: usize = path.iter().map(crate::compaction::estimate_tokens_for_entry).sum();
+            let estimated_tokens: usize = path
+                .iter()
+                .map(crate::compaction::estimate_tokens_for_entry)
+                .sum();
             let decision = h
                 .before_compact(BeforeCompactCtx {
                     estimated_tokens,
