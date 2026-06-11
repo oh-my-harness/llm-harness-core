@@ -180,21 +180,24 @@ impl Session {
 
     /// Return a list of all branches (one per leaf).
     pub async fn list_branches(&self) -> Result<Vec<BranchInfo>, SessionError> {
-        let leaves = self.storage.all_leaves().await?;
-        let mut branches = Vec::with_capacity(leaves.len());
-        for leaf_id in leaves {
-            let path = self.storage.path_to_root(leaf_id).await?;
+        let all_paths = self.storage.paths_to_all_leaves().await?;
+        let mut branches = Vec::with_capacity(all_paths.len());
+        for path in all_paths {
+            let Some(leaf_entry) = path.last() else {
+                continue;
+            };
+            let leaf_id = leaf_entry.id;
             let message_count = path.len();
-            let last_activity = path.last().map(|e| e.timestamp).unwrap_or_else(Utc::now);
+            let last_activity = leaf_entry.timestamp;
             let label = self.storage.label_at(leaf_id).await?;
-            // Find BranchSummary entry referencing this leaf.
             let summary = path.iter().rev().find_map(|e| {
                 if let SessionEntryPayload::BranchSummary(bs) = &e.payload
                     && bs.leaf_id == leaf_id
                 {
-                    return Some(bs.summary.clone());
+                    Some(bs.summary.clone())
+                } else {
+                    None
                 }
-                None
             });
             branches.push(BranchInfo {
                 leaf_id,

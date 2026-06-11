@@ -53,6 +53,12 @@ pub trait SessionStorage: Send + Sync {
     /// Return the label name for the entry at `id`, if any.
     fn label_at(&self, id: EntryId) -> BoxFuture<'_, Result<Option<String>, SessionError>>;
 
+    /// Return all leaf-to-root paths in a single traversal.
+    ///
+    /// Each inner `Vec` is ordered root-first (same convention as `path_to_root`).
+    /// Replaces L calls to `path_to_root` in `Session::list_branches`.
+    fn paths_to_all_leaves(&self) -> BoxFuture<'_, Result<Vec<Vec<SessionEntry>>, SessionError>>;
+
     /// Find all entries of a given kind.
     fn find_entries_by_type(
         &self,
@@ -230,16 +236,52 @@ impl SessionStorage for InMemorySessionStorage {
         Box::pin(async move {
             use super::types::SessionEntryPayload;
             let st = self.inner.lock().unwrap();
-            // Find a Label entry whose `from` target matches `id`.
-            // For simplicity we scan all entries (acceptable for in-memory).
-            for entry in st.entries.values() {
-                if let SessionEntryPayload::Label { name } = &entry.payload
-                    && entry.parent_id == Some(id)
+            let children = st
+                .children
+                .get(&Some(id))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            for child_id in children {
+                if let Some(e) = st.entries.get(child_id)
+                    && let SessionEntryPayload::Label { name } = &e.payload
                 {
                     return Ok(Some(name.clone()));
                 }
             }
             Ok(None)
+        })
+    }
+
+    fn paths_to_all_leaves(&self) -> BoxFuture<'_, Result<Vec<Vec<SessionEntry>>, SessionError>> {
+        Box::pin(async move {
+            let st = self.inner.lock().unwrap();
+            let leaves: Vec<EntryId> = st
+                .entries
+                .keys()
+                .filter(|id| {
+                    st.children
+                        .get(&Some(**id))
+                        .map(|v| v.is_empty())
+                        .unwrap_or(true)
+                })
+                .copied()
+                .collect();
+            let mut result = Vec::with_capacity(leaves.len());
+            for leaf_id in leaves {
+                let mut path = Vec::new();
+                let mut cur = Some(leaf_id);
+                while let Some(id) = cur {
+                    if let Some(e) = st.entries.get(&id) {
+                        path.push(e.clone());
+                        cur = e.parent_id;
+                    } else {
+                        break;
+                    }
+                }
+                path.reverse();
+                result.push(path);
+            }
+            Ok(result)
         })
     }
 

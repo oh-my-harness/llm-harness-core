@@ -251,14 +251,55 @@ impl SessionStorage for JsonlSessionStorage {
         Box::pin(async move {
             let mut inner = self.inner.lock().await;
             Self::ensure_loaded(&mut inner).await?;
-            for entry in inner.entry_map.values() {
-                if let SessionEntryPayload::Label { name } = &entry.payload
-                    && entry.parent_id == Some(id)
+            let children = inner
+                .children_map
+                .get(&Some(id))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            for child_id in children {
+                if let Some(e) = inner.entry_map.get(child_id)
+                    && let SessionEntryPayload::Label { name } = &e.payload
                 {
                     return Ok(Some(name.clone()));
                 }
             }
             Ok(None)
+        })
+    }
+
+    fn paths_to_all_leaves(&self) -> BoxFuture<'_, Result<Vec<Vec<SessionEntry>>, SessionError>> {
+        Box::pin(async move {
+            let mut inner = self.inner.lock().await;
+            Self::ensure_loaded(&mut inner).await?;
+            let leaves: Vec<EntryId> = inner
+                .entry_map
+                .keys()
+                .filter(|id| {
+                    inner
+                        .children_map
+                        .get(&Some(**id))
+                        .map(|v| v.is_empty())
+                        .unwrap_or(true)
+                })
+                .copied()
+                .collect();
+            let mut result = Vec::with_capacity(leaves.len());
+            for leaf_id in leaves {
+                let mut path = Vec::new();
+                let mut current = Some(leaf_id);
+                while let Some(id) = current {
+                    match inner.entry_map.get(&id) {
+                        Some(e) => {
+                            path.push(e.clone());
+                            current = e.parent_id;
+                        }
+                        None => return Err(SessionError::EntryNotFound(id)),
+                    }
+                }
+                path.reverse();
+                result.push(path);
+            }
+            Ok(result)
         })
     }
 

@@ -1689,6 +1689,12 @@ mod tests {
         ) -> BoxFuture<'_, Result<Option<String>, llm_harness_types::SessionError>> {
             self.inner.label_at(id)
         }
+        fn paths_to_all_leaves(
+            &self,
+        ) -> BoxFuture<'_, Result<Vec<Vec<SessionEntry>>, llm_harness_types::SessionError>>
+        {
+            self.inner.paths_to_all_leaves()
+        }
         fn find_entries_by_type(
             &self,
             kind: SessionEntryKind,
