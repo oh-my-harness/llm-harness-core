@@ -772,6 +772,12 @@ impl AgentHarness {
 
     /// Append an `AgentMessage` to the session and return its entry ID.
     pub async fn append_message(&self, msg: AgentMessage) -> Result<EntryId, HarnessError> {
+        {
+            let inner = self.inner.lock().unwrap();
+            if inner.state.phase != HarnessPhase::Idle {
+                return Err(HarnessError::NotIdle(inner.state.phase));
+            }
+        }
         Ok(self.session.append_message(msg).await?)
     }
 
@@ -781,6 +787,12 @@ impl AgentHarness {
         custom_type: String,
         data: serde_json::Value,
     ) -> Result<EntryId, HarnessError> {
+        {
+            let inner = self.inner.lock().unwrap();
+            if inner.state.phase != HarnessPhase::Idle {
+                return Err(HarnessError::NotIdle(inner.state.phase));
+            }
+        }
         Ok(self
             .session
             .append(SessionEntryPayload::Custom { custom_type, data })
@@ -1765,6 +1777,42 @@ mod tests {
         let err = h.prompt("hi").await;
         assert!(matches!(err, Err(HarnessError::NotIdle(_))));
         h.inner.lock().unwrap().state.phase = HarnessPhase::Idle;
+    }
+
+    #[tokio::test]
+    async fn append_message_while_turning_returns_not_idle() {
+        let h = make_harness(vec![]);
+        {
+            let mut inner = h.inner.lock().unwrap();
+            inner.state.phase = HarnessPhase::Turning;
+        }
+
+        let msg = AgentMessage::User(UserMessage {
+            content: vec![ContentBlock::Text {
+                text: "test".into(),
+            }],
+            timestamp: chrono::Utc::now(),
+        });
+        let err = h.append_message(msg).await;
+
+        h.inner.lock().unwrap().state.phase = HarnessPhase::Idle;
+        assert!(matches!(err, Err(HarnessError::NotIdle(_))));
+    }
+
+    #[tokio::test]
+    async fn append_custom_entry_while_turning_returns_not_idle() {
+        let h = make_harness(vec![]);
+        {
+            let mut inner = h.inner.lock().unwrap();
+            inner.state.phase = HarnessPhase::Turning;
+        }
+
+        let err = h
+            .append_custom_entry("test_type".into(), serde_json::json!({}))
+            .await;
+
+        h.inner.lock().unwrap().state.phase = HarnessPhase::Idle;
+        assert!(matches!(err, Err(HarnessError::NotIdle(_))));
     }
 
     #[tokio::test]
