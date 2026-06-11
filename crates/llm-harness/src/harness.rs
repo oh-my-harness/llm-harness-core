@@ -1044,13 +1044,23 @@ impl AgentHarness {
     }
 
     async fn flush_pending_writes(&self) -> Result<usize, HarnessError> {
-        let pending: Vec<SessionEntryPayload> = {
-            let mut inner = self.inner.lock().unwrap();
-            std::mem::take(&mut inner.state.pending_session_writes)
-        };
-        let count = pending.len();
-        for payload in pending {
+        let mut count = 0;
+        loop {
+            let payload = {
+                let inner = self.inner.lock().unwrap();
+                inner.state.pending_session_writes.first().cloned()
+            };
+            let Some(payload) = payload else { break };
+            // Write before removing. If this fails, payload remains in pending.
+            // The run_loop cleanup in the Err branch will clear the remainder.
             self.session.append(payload).await?;
+            self.inner
+                .lock()
+                .unwrap()
+                .state
+                .pending_session_writes
+                .remove(0);
+            count += 1;
         }
         Ok(count)
     }
@@ -1177,7 +1187,7 @@ impl AgentHarness {
     }
 
     async fn run_loop(&self, initial: Vec<AgentMessage>) -> Result<(), HarnessError> {
-        // 1. Transition to Turning; reset channels; create abort token.
+        // 1. Setup: channels, abort token, system prompt.
         let (steer_rx, follow_up_rx, abort, system_prompt) = {
             let mut inner = self.inner.lock().unwrap();
             inner.state.streaming_message = None;
@@ -1190,6 +1200,33 @@ impl AgentHarness {
         };
         self.set_phase(HarnessPhase::Turning);
 
+        let result = self
+            .drive_loop(initial, steer_rx, follow_up_rx, abort, system_prompt)
+            .await;
+
+        // Cleanup always runs, success or failure.
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.state.streaming_message = None;
+            inner.state.pending_tool_calls.clear();
+            inner.current_abort = None;
+            if result.is_err() {
+                inner.state.error_message = Some(result.as_ref().unwrap_err().to_string());
+                inner.state.pending_session_writes.clear();
+            }
+        }
+        self.set_phase(HarnessPhase::Idle);
+        result
+    }
+
+    async fn drive_loop(
+        &self,
+        initial: Vec<AgentMessage>,
+        steer_rx: mpsc::Receiver<AgentMessage>,
+        follow_up_rx: mpsc::Receiver<AgentMessage>,
+        abort: CancellationToken,
+        system_prompt: Option<String>,
+    ) -> Result<(), HarnessError> {
         // 2. Build context from session.
         let built = self.session.build_context().await?;
         let messages: Vec<AgentMessage> =
@@ -1343,14 +1380,6 @@ impl AgentHarness {
             }
         }
 
-        // 5. Clear running state and restore Idle.
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.state.streaming_message = None;
-            inner.state.pending_tool_calls.clear();
-            inner.current_abort = None;
-        }
-        self.set_phase(HarnessPhase::Idle);
         Ok(())
     }
 
@@ -1480,7 +1509,153 @@ impl AgentHarness {
 #[cfg(feature = "test-utils")]
 mod tests {
     use super::*;
+    use crate::session::storage::SessionStorage;
+    use crate::session::types::{SessionEntry, SessionEntryKind, SessionMetadata};
+    use futures::future::BoxFuture;
     use llm_harness_loop::test_utils::{MockLlmClient, MockResponse, NoOpEnv};
+
+    /// Test helper: wraps any SessionStorage and fails `append_entry` after `fail_after` successes.
+    struct FailAfterNStorage {
+        inner: Arc<dyn SessionStorage>,
+        fail_after: usize,
+        call_count: std::sync::Mutex<usize>,
+    }
+
+    impl FailAfterNStorage {
+        fn new(inner: Arc<dyn SessionStorage>, fail_after: usize) -> Self {
+            Self {
+                inner,
+                fail_after,
+                call_count: std::sync::Mutex::new(0),
+            }
+        }
+    }
+
+    impl SessionStorage for FailAfterNStorage {
+        fn append_entry(
+            &self,
+            entry: SessionEntry,
+        ) -> BoxFuture<'_, Result<(), llm_harness_types::SessionError>> {
+            Box::pin(async move {
+                {
+                    let mut n = self.call_count.lock().unwrap();
+                    if *n >= self.fail_after {
+                        return Err(llm_harness_types::SessionError::ConcurrentModification);
+                    }
+                    *n += 1;
+                } // lock dropped here before await
+                self.inner.append_entry(entry).await
+            })
+        }
+        fn metadata(
+            &self,
+        ) -> BoxFuture<'_, Result<SessionMetadata, llm_harness_types::SessionError>> {
+            self.inner.metadata()
+        }
+        fn create_entry_id(&self) -> llm_harness_types::EntryId {
+            self.inner.create_entry_id()
+        }
+        fn get_entry(
+            &self,
+            id: llm_harness_types::EntryId,
+        ) -> BoxFuture<'_, Result<Option<SessionEntry>, llm_harness_types::SessionError>> {
+            self.inner.get_entry(id)
+        }
+        fn children(
+            &self,
+            parent: llm_harness_types::EntryId,
+        ) -> BoxFuture<'_, Result<Vec<SessionEntry>, llm_harness_types::SessionError>> {
+            self.inner.children(parent)
+        }
+        fn all_leaves(
+            &self,
+        ) -> BoxFuture<'_, Result<Vec<llm_harness_types::EntryId>, llm_harness_types::SessionError>>
+        {
+            self.inner.all_leaves()
+        }
+        fn active_cursor(
+            &self,
+        ) -> BoxFuture<
+            '_,
+            Result<Option<llm_harness_types::EntryId>, llm_harness_types::SessionError>,
+        > {
+            self.inner.active_cursor()
+        }
+        fn set_active_cursor(
+            &self,
+            id: llm_harness_types::EntryId,
+        ) -> BoxFuture<'_, Result<(), llm_harness_types::SessionError>> {
+            self.inner.set_active_cursor(id)
+        }
+        fn path_to_root(
+            &self,
+            target: llm_harness_types::EntryId,
+        ) -> BoxFuture<'_, Result<Vec<SessionEntry>, llm_harness_types::SessionError>> {
+            self.inner.path_to_root(target)
+        }
+        fn common_ancestor(
+            &self,
+            a: llm_harness_types::EntryId,
+            b: llm_harness_types::EntryId,
+        ) -> BoxFuture<
+            '_,
+            Result<Option<llm_harness_types::EntryId>, llm_harness_types::SessionError>,
+        > {
+            self.inner.common_ancestor(a, b)
+        }
+        fn label_at(
+            &self,
+            id: llm_harness_types::EntryId,
+        ) -> BoxFuture<'_, Result<Option<String>, llm_harness_types::SessionError>> {
+            self.inner.label_at(id)
+        }
+        fn find_entries_by_type(
+            &self,
+            kind: SessionEntryKind,
+        ) -> BoxFuture<'_, Result<Vec<llm_harness_types::EntryId>, llm_harness_types::SessionError>>
+        {
+            self.inner.find_entries_by_type(kind)
+        }
+        fn update_metadata_name(
+            &self,
+            name: Option<String>,
+        ) -> BoxFuture<'_, Result<(), llm_harness_types::SessionError>> {
+            self.inner.update_metadata_name(name)
+        }
+        fn update_metadata_model(
+            &self,
+            model: Option<String>,
+        ) -> BoxFuture<'_, Result<(), llm_harness_types::SessionError>> {
+            self.inner.update_metadata_model(model)
+        }
+        fn delete_entries(
+            &self,
+            ids: Vec<llm_harness_types::EntryId>,
+        ) -> BoxFuture<'_, Result<(), llm_harness_types::SessionError>> {
+            self.inner.delete_entries(ids)
+        }
+    }
+
+    fn make_harness_failing_storage(
+        fail_after: usize,
+        responses: Vec<MockResponse>,
+    ) -> AgentHarness {
+        let repo = crate::session::repo::InMemorySessionRepo::new();
+        let storage = futures::executor::block_on(
+            repo.create(crate::session::types::CreateSessionOptions::default()),
+        )
+        .unwrap();
+        let failing = Arc::new(FailAfterNStorage::new(storage, fail_after));
+        let session = crate::session::session::Session::new(failing as Arc<dyn SessionStorage>);
+        let client = Arc::new(MockLlmClient::new(responses));
+        let env = Arc::new(NoOpEnv);
+        AgentHarness::with_session(
+            client as Arc<dyn LlmClient>,
+            env,
+            session,
+            AgentHarnessOptions::new("test-model"),
+        )
+    }
 
     fn make_harness(responses: Vec<MockResponse>) -> AgentHarness {
         let client = Arc::new(MockLlmClient::new(responses));
@@ -1491,6 +1666,22 @@ mod tests {
             env,
             opts,
         ))
+    }
+
+    #[tokio::test]
+    async fn flush_error_returns_phase_to_idle() {
+        // Storage fails immediately on append_entry (fail_after=0)
+        let h = make_harness_failing_storage(0, vec![MockResponse::text("hi")]);
+
+        let result = h.prompt("hello").await;
+
+        // Bug: phase stays Turning. Fix: phase must return to Idle.
+        assert_eq!(
+            h.state().phase,
+            HarnessPhase::Idle,
+            "phase must be Idle after flush error"
+        );
+        assert!(result.is_err(), "prompt must return Err when storage fails");
     }
 
     #[tokio::test]
