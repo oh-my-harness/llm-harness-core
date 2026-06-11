@@ -11,9 +11,6 @@ use crate::session::types::{CompactionEntry, SessionEntry, SessionEntryPayload};
 /// Tokens estimated per character (rough 4-char-per-token approximation).
 const CHARS_PER_TOKEN: usize = 4;
 
-/// Max tokens for the summarization LLM output.
-const SUMMARY_MAX_TOKENS: u32 = 4096;
-
 const SUMMARIZATION_SYSTEM_PROMPT: &str = "\
 You are a context summarization assistant. Your task is to read a conversation \
 between a user and an AI coding assistant, then produce a structured summary \
@@ -124,9 +121,10 @@ fn estimate_tokens_for_message(msg: &AgentMessage) -> usize {
     match msg {
         AgentMessage::User(u) => estimate_tokens_for_content_blocks(&u.content),
         AgentMessage::Assistant(a) => {
-            // Use actual token count when available; otherwise estimate.
+            // Use actual output token count when available; `input_tokens` reflects the
+            // full request cost (all prior context), not the size of this message alone.
             if let Some(usage) = &a.usage {
-                return (usage.input_tokens + usage.output_tokens) as usize;
+                return usage.output_tokens as usize;
             }
             estimate_tokens_for_content_blocks(&a.content)
         }
@@ -137,6 +135,10 @@ fn estimate_tokens_for_message(msg: &AgentMessage) -> usize {
     }
 }
 
+/// Estimates the token cost of a single session entry.
+///
+/// Uses actual usage data when available, falls back to character-count heuristics.
+/// Non-message entries (config changes) contribute zero tokens.
 pub(crate) fn estimate_tokens_for_entry(entry: &SessionEntry) -> usize {
     match &entry.payload {
         SessionEntryPayload::Message(msg) => estimate_tokens_for_message(msg),
@@ -266,7 +268,15 @@ pub async fn compact(
         .position(|e| e.id == preparation.cut_point)
         .unwrap_or(preparation.path_entries.len());
 
-    let entries_to_compress = &preparation.path_entries[..cut_idx];
+    // For second+ compaction, only compress entries since the previous kept boundary,
+    // not the entire path (those earlier entries are already captured in previous_summary).
+    let first_kept_idx = preparation
+        .path_entries
+        .iter()
+        .position(|e| e.id == preparation.first_kept_entry)
+        .unwrap_or(0);
+
+    let entries_to_compress = &preparation.path_entries[first_kept_idx..cut_idx];
 
     // Format conversation history as text.
     let conversation_text = format_entries_as_text(entries_to_compress);
@@ -289,12 +299,27 @@ pub async fn compact(
         )
     };
 
-    let req = ChatRequest::builder(settings.summary_model.clone(), SUMMARY_MAX_TOKENS)
-        .messages(vec![
-            LlmMessage::System(SUMMARIZATION_SYSTEM_PROMPT.to_string()),
-            LlmMessage::User(vec![RequestContent::Text(user_content)]),
-        ])
-        .build();
+    // Validate that the prompt fits within the summary model's context window.
+    let prompt_tokens = estimate_tokens_for_text(SUMMARIZATION_SYSTEM_PROMPT)
+        + estimate_tokens_for_text(&user_content);
+    let max_input_tokens = (settings.summary_model_info.context_window as usize)
+        .saturating_sub(settings.summary_model_info.max_tokens as usize);
+    if prompt_tokens > max_input_tokens {
+        return Err(CompactionError::SummaryFailed(format!(
+            "conversation too long to summarize: ~{prompt_tokens} tokens exceeds \
+             summary model input budget of {max_input_tokens}"
+        )));
+    }
+
+    let req = ChatRequest::builder(
+        settings.summary_model.clone(),
+        settings.summary_model_info.max_tokens,
+    )
+    .messages(vec![
+        LlmMessage::System(SUMMARIZATION_SYSTEM_PROMPT.to_string()),
+        LlmMessage::User(vec![RequestContent::Text(user_content)]),
+    ])
+    .build();
 
     let response = client
         .chat(&req)
@@ -347,6 +372,9 @@ pub async fn compact(
 
 // ── Conversation serialization ────────────────────────────────────────────────
 
+/// Serializes session entries to a human-readable string for the compaction LLM.
+///
+/// Only message and model-change entries are rendered; other entry types are skipped.
 pub(crate) fn format_entries_as_text(entries: &[SessionEntry]) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -395,15 +423,11 @@ fn format_message(msg: &AgentMessage) -> String {
 fn content_blocks_to_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
-            ContentBlock::ToolUse { name, input, .. } => {
-                // Include tool call summary inline
-                let _ = (name, input);
-                None
-            }
-            ContentBlock::Image { .. } => Some("[image]"),
+        .map(|b| match b {
+            ContentBlock::Text { text } => text.clone(),
+            ContentBlock::Thinking { thinking, .. } => thinking.clone(),
+            ContentBlock::ToolUse { name, input, .. } => format!("[Tool: {name}({input})]"),
+            ContentBlock::Image { .. } => "[image]".to_string(),
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -452,8 +476,8 @@ mod tests {
 
     fn big_token_usage(n: u32) -> TokenUsage {
         TokenUsage {
-            input_tokens: n,
-            output_tokens: 0,
+            input_tokens: 0,
+            output_tokens: n,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
         }

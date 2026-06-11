@@ -20,6 +20,7 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
+    /// Creates a new `RetryConfig` with the given max retry count and base backoff delay.
     pub fn new(max_retries: u32, base_delay_ms: u64) -> Self {
         Self {
             max_retries,

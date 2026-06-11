@@ -68,16 +68,12 @@ impl Tool for HookedTool {
 
             // Apply after-hook
             if let Some(h) = &self.after {
-                let result_for_hook = result
-                    .as_ref()
-                    .map(|r| r.clone())
-                    .map_err(|e| ToolError::Execution(e.to_string()));
                 let after_ctx = AfterToolCallCtx {
                     assistant_message: &ctx.assistant_message,
                     tool_use_id: &ctx.tool_use_id,
                     tool_name: self.inner.name(),
                     args: &effective_args,
-                    result: &result_for_hook,
+                    result: &result,
                     turn_index: ctx.turn_index,
                 };
                 return match h.on_complete(after_ctx).await {

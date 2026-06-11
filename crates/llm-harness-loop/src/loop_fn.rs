@@ -120,6 +120,13 @@ fn run_loop(
             }
             let req = req_b.build();
 
+            // BeforeProviderRequestHook: allow callers to modify stream options.
+            let mut stream_opts = config.stream_options.clone();
+            if let Some(h) = &config.before_provider_request {
+                h.before_request(&mut stream_opts).await;
+            }
+            let _ = stream_opts; // currently not forwarded to adapter; reserved for future use
+
             // Call LLM (with optional retry on transient errors)
             let mut handle = {
                 use crate::config::{is_retryable, RetryConfig};
@@ -179,6 +186,17 @@ fn run_loop(
                 }
             };
 
+            // AfterProviderResponseHook: observation hook for quota tracking, cost monitoring.
+            if let Some(h) = &config.after_provider_response {
+                let info = ProviderResponseInfo {
+                    status_code: None,
+                    response_headers: vec![],
+                    usage: assistant_msg.usage.clone(),
+                    latency_ms: 0,
+                };
+                h.after_response(&info).await;
+            }
+
             let assistant_agent_msg = AgentMessage::Assistant(assistant_msg.clone());
             ctx.messages.push(assistant_agent_msg.clone());
             new_messages.push(assistant_agent_msg);
@@ -211,6 +229,15 @@ fn run_loop(
                     })
                     .collect();
 
+                // Identify unregistered tool calls before moving `calls` into the executor.
+                // Leaving orphan ToolUse blocks without a matching ToolResult would cause
+                // a 400 error on the next provider request.
+                let unmatched: Vec<(String, String)> = tool_calls
+                    .iter()
+                    .filter(|(id, _, _)| !calls.iter().any(|(cid, _, _)| cid == id))
+                    .map(|(id, name, _)| (id.clone(), name.clone()))
+                    .collect();
+
                 // Emit ToolExecutionStart for each call
                 for (id, name, args) in &tool_calls {
                     yield AgentEvent::ToolExecutionStart {
@@ -225,27 +252,40 @@ fn run_loop(
                 let abort = config.abort.clone();
                 let turn_idx = turn_index;
 
-                let results = execute_tool_batch(
+                // Create a shared update channel whose receiver outlives the batch,
+                // so tool send calls don't fail with a disconnected-channel error.
+                let (update_tx, _update_rx) = mpsc::channel::<ToolResult>(64);
+
+                let mut results = execute_tool_batch(
                     calls,
                     {
                         let env = env.clone();
                         let abort = abort.clone();
                         let assistant_arc = assistant_arc.clone();
+                        let update_tx = update_tx.clone();
                         move |tool_use_id| {
-                            let (tx, _rx) = mpsc::channel(16);
                             ToolContext {
                                 env: env.clone(),
                                 abort: abort.clone(),
                                 tool_use_id,
                                 turn_index: turn_idx,
                                 assistant_message: assistant_arc.clone(),
-                                update_tx: tx,
+                                update_tx: update_tx.clone(),
                             }
                         }
                     },
                     config.default_execution_mode,
                 )
                 .await;
+
+                // Append synthetic error results for any tool calls not matched to a
+                // registered tool; leaving orphan ToolUse blocks causes a provider 400.
+                for (id, name) in unmatched {
+                    results.push((
+                        id,
+                        Err(ToolError::Execution(format!("Unknown tool: {name}"))),
+                    ));
+                }
 
                 // Emit ToolExecutionEnd and build ToolResult messages
                 for (id, result) in &results {
@@ -288,7 +328,11 @@ fn run_loop(
                         Ok(directive) => {
                             if let Some(new_ctx) = directive.context { ctx = new_ctx; }
                             if let Some(m) = directive.model { config.model = m; }
+                            if let Some(level) = directive.thinking_level { config.thinking_level = level; }
                             if let Some(tools) = directive.tools { config.tools = tools; }
+                            if let Some(active) = directive.active_tools {
+                                config.tools.retain(|t| active.contains(t.name()));
+                            }
                         }
                         Err(e) => {
                             yield AgentEvent::Error(e);
@@ -357,7 +401,11 @@ fn run_loop(
                     Ok(directive) => {
                         if let Some(new_ctx) = directive.context { ctx = new_ctx; }
                         if let Some(m) = directive.model { config.model = m; }
+                        if let Some(level) = directive.thinking_level { config.thinking_level = level; }
                         if let Some(tools) = directive.tools { config.tools = tools; }
+                        if let Some(active) = directive.active_tools {
+                            config.tools.retain(|t| active.contains(t.name()));
+                        }
                     }
                     Err(e) => {
                         yield AgentEvent::Error(e);

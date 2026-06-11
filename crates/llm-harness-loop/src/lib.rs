@@ -10,10 +10,10 @@
 
 pub mod config;
 pub mod convert;
-pub mod dispatch;
+pub(crate) mod dispatch;
 pub mod hooked_tool;
 pub mod loop_fn;
-pub mod stream_state;
+pub(crate) mod stream_state;
 
 mod type_bridge;
 
