@@ -22,6 +22,14 @@ use std::{
 use llm_adapter::deepseek;
 use llm_harness::prelude::{Agent, AgentEvent, AgentMessage, AgentOptions, ContentBlock};
 use llm_harness_loop::LlmClient;
+use tokio::task::JoinHandle;
+
+#[derive(Default)]
+struct EventCounts {
+    text_chunks: u64,
+    thinking_chunks: u64,
+    skipped_events: u64,
+}
 
 fn assistant_text(messages: &[AgentMessage]) -> String {
     let mut output = String::new();
@@ -63,16 +71,13 @@ async fn main() -> anyhow::Result<()> {
     opts.system_prompt = Some("You are a concise assistant.".into());
     let agent = Agent::new(client, opts);
 
-    //事件订阅
-    let mut events = agent.subscribe();
-
     println!("model: {model}");
     println!("type a message and press Enter; use `exit` or `quit` to stop");
     println!();
 
     if let Some(prompt) = first_prompt {
         println!("You > {prompt}");
-        run_turn(&agent, &mut events, &prompt).await?;
+        run_turn(&agent, &prompt).await?;
     }
 
     let stdin = io::stdin();
@@ -95,37 +100,56 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        run_turn(&agent, &mut events, prompt).await?;
+        run_turn(&agent, prompt).await?;
     }
 
     Ok(())
 }
 
-async fn run_turn(
-    agent: &Agent,
-    events: &mut tokio::sync::broadcast::Receiver<Arc<AgentEvent>>,
-    prompt: &str,
-) -> anyhow::Result<()> {
+fn spawn_event_counter(agent: &Agent) -> JoinHandle<EventCounts> {
+    // Subscribe for this turn only. That avoids mixing stale events from a
+    // previous prompt with the events emitted by the current prompt.
+    let mut events = agent.subscribe();
+
+    tokio::spawn(async move {
+        let mut counts = EventCounts::default();
+
+        loop {
+            match events.recv().await {
+                Ok(event) => match event.as_ref() {
+                    AgentEvent::TextDelta { .. } => counts.text_chunks += 1,
+                    AgentEvent::ThinkingDelta { .. } => counts.thinking_chunks += 1,
+                    AgentEvent::Error(err) => eprintln!("agent error: {err}"),
+                    AgentEvent::AgentEnd { .. } => break,
+                    _ => {}
+                },
+                // A broadcast receiver can lag if the sender produces events
+                // faster than this task can consume them. Keep going so later
+                // turns do not get stuck behind a lagged receiver.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    counts.skipped_events += skipped;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+
+        counts
+    })
+}
+
+async fn run_turn(agent: &Agent, prompt: &str) -> anyhow::Result<()> {
     // Remember where the transcript was before this turn so we can print only
     // the assistant messages produced for the current user input.
     let message_start = agent.state().messages.len();
+    let event_counter = spawn_event_counter(agent);
 
     // prompt() appends the user message to the existing transcript, runs the
     // full agent loop, and returns after the model stops.
-    agent.prompt(prompt.to_owned()).await?;
-
-    // Drain events emitted during this turn. For a small CLI example we only
-    // count text/thinking chunks; applications can handle every event in real time.
-    let mut text_chunks = 0usize;
-    let mut thinking_chunks = 0usize;
-    while let Ok(event) = events.try_recv() {
-        match event.as_ref() {
-            AgentEvent::TextDelta { .. } => text_chunks += 1,
-            AgentEvent::ThinkingDelta { .. } => thinking_chunks += 1,
-            AgentEvent::Error(err) => eprintln!("agent error: {err}"),
-            _ => {}
-        }
+    if let Err(err) = agent.prompt(prompt.to_owned()).await {
+        event_counter.abort();
+        return Err(err.into());
     }
+    let counts = event_counter.await?;
 
     // Agent::state() exposes the in-memory transcript accumulated so far.
     let state = agent.state();
@@ -133,7 +157,16 @@ async fn run_turn(
 
     println!("Assistant > {answer}");
     println!("------------------------------------------------------------------------------");
-    println!("events: {text_chunks} text chunks, {thinking_chunks} thinking chunks");
+    println!(
+        "events: {} text chunks, {} thinking chunks",
+        counts.text_chunks, counts.thinking_chunks
+    );
+    if counts.skipped_events > 0 {
+        println!(
+            "warning: skipped {} broadcast events",
+            counts.skipped_events
+        );
+    }
     println!();
 
     Ok(())
