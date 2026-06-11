@@ -1555,7 +1555,7 @@ impl AgentHarness {
         let compressed_entries = path
             .iter()
             .position(|e| e.id == result.first_kept_entry)
-            .unwrap_or(0);
+            .expect("first_kept_entry validated before apply_compaction_result");
 
         let details = if result.file_operations.is_empty() {
             None
