@@ -16,6 +16,7 @@ pub struct Session {
 }
 
 impl Session {
+    /// Wrap a storage backend in the high-level `Session` interface.
     pub fn new(storage: Arc<dyn SessionStorage>) -> Self {
         Self { storage }
     }

@@ -14,18 +14,22 @@ use super::types::{
 
 /// Repository managing multiple sessions' lifecycles.
 pub trait SessionRepo: Send + Sync {
+    /// Create a new session with the given options.
     fn create(
         &self,
         opts: CreateSessionOptions,
     ) -> BoxFuture<'_, Result<Arc<dyn SessionStorage>, SessionError>>;
 
+    /// Open an existing session by ID.
     fn open(&self, id: &str) -> BoxFuture<'_, Result<Arc<dyn SessionStorage>, SessionError>>;
 
+    /// List sessions matching `opts`.
     fn list(
         &self,
         opts: ListSessionOptions,
     ) -> BoxFuture<'_, Result<Vec<SessionMetadata>, SessionError>>;
 
+    /// Permanently delete the session with the given ID.
     fn delete(&self, id: &str) -> BoxFuture<'_, Result<(), SessionError>>;
 
     /// Cross-session fork: copy the path from root to `from_entry` into a new session.
@@ -49,6 +53,7 @@ pub struct InMemorySessionRepo {
 }
 
 impl InMemorySessionRepo {
+    /// Create a new in-memory session repository.
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(RepoState {

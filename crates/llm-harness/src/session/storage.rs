@@ -13,21 +13,28 @@ use super::types::{SessionEntry, SessionEntryKind, SessionMetadata};
 /// Implementations must serialize all writes internally so callers can share
 /// `Arc<dyn SessionStorage>` freely.
 pub trait SessionStorage: Send + Sync {
+    /// Return the current session metadata snapshot.
     fn metadata(&self) -> BoxFuture<'_, Result<SessionMetadata, SessionError>>;
 
     /// Generate a new time-ordered entry ID (sync — no I/O needed).
     fn create_entry_id(&self) -> EntryId;
 
+    /// Append a pre-built entry; advances `active_cursor` to the new entry's ID.
     fn append_entry(&self, entry: SessionEntry) -> BoxFuture<'_, Result<(), SessionError>>;
 
+    /// Get an entry by ID.
     fn get_entry(&self, id: EntryId) -> BoxFuture<'_, Result<Option<SessionEntry>, SessionError>>;
 
+    /// Get all child entries of the given parent.
     fn children(&self, parent: EntryId) -> BoxFuture<'_, Result<Vec<SessionEntry>, SessionError>>;
 
+    /// Get all leaf entry IDs (entries with no children).
     fn all_leaves(&self) -> BoxFuture<'_, Result<Vec<EntryId>, SessionError>>;
 
+    /// Get the current active cursor position.
     fn active_cursor(&self) -> BoxFuture<'_, Result<Option<EntryId>, SessionError>>;
 
+    /// Set the active cursor to a new position.
     fn set_active_cursor(&self, id: EntryId) -> BoxFuture<'_, Result<(), SessionError>>;
 
     /// Return all entries from `target` to the root, ordered root-first.
@@ -36,6 +43,7 @@ pub trait SessionStorage: Send + Sync {
         target: EntryId,
     ) -> BoxFuture<'_, Result<Vec<SessionEntry>, SessionError>>;
 
+    /// Find the lowest common ancestor of two entries.
     fn common_ancestor(
         &self,
         a: EntryId,
@@ -45,14 +53,17 @@ pub trait SessionStorage: Send + Sync {
     /// Return the label name for the entry at `id`, if any.
     fn label_at(&self, id: EntryId) -> BoxFuture<'_, Result<Option<String>, SessionError>>;
 
+    /// Find all entries of a given kind.
     fn find_entries_by_type(
         &self,
         kind: SessionEntryKind,
     ) -> BoxFuture<'_, Result<Vec<EntryId>, SessionError>>;
 
+    /// Update the session name.
     fn update_metadata_name(&self, name: Option<String>)
     -> BoxFuture<'_, Result<(), SessionError>>;
 
+    /// Update the session model.
     fn update_metadata_model(
         &self,
         model: Option<String>,
@@ -79,6 +90,7 @@ pub struct InMemorySessionStorage {
 }
 
 impl InMemorySessionStorage {
+    /// Create a new in-memory session storage with the given initial metadata.
     pub fn new(metadata: SessionMetadata) -> Self {
         Self {
             inner: Mutex::new(InMemoryState {

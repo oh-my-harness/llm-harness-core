@@ -132,67 +132,119 @@ pub enum AgentHarnessEvent {
     Agent(AgentEvent),
     /// Harness phase changed.
     PhaseChange {
+        /// Previous phase.
         from: HarnessPhase,
+        /// New phase.
         to: HarnessPhase,
     },
     /// Active model changed.
-    ModelUpdate { from: String, to: String },
+    ModelUpdate {
+        /// Previous model ID.
+        from: String,
+        /// New model ID.
+        to: String,
+    },
     /// Thinking level changed.
     ThinkingLevelUpdate {
+        /// Previous thinking level.
         from: ThinkingLevel,
+        /// New thinking level.
         to: ThinkingLevel,
     },
     /// Tool list changed.
     ToolsUpdate {
+        /// Tool names added.
         added: Vec<String>,
+        /// Tool names removed.
         removed: Vec<String>,
     },
     /// Active tool subset changed.
-    ActiveToolsUpdate { active: Option<HashSet<String>> },
+    ActiveToolsUpdate {
+        /// Active tools; `None` means all tools are active.
+        active: Option<HashSet<String>>,
+    },
     /// Loaded resources changed.
     ResourcesUpdate {
+        /// Number of loaded skills.
         skills: usize,
+        /// Number of loaded prompt templates.
         templates: usize,
+        /// Diagnostics from resource loading.
         diagnostics: Vec<SkillDiagnostic>,
     },
     /// Session name changed.
-    SessionInfoUpdate { name: String },
+    SessionInfoUpdate {
+        /// New session name.
+        name: String,
+    },
     /// Compaction started.
-    CompactionStart { estimated_tokens: usize },
+    CompactionStart {
+        /// Estimated token count before compaction.
+        estimated_tokens: usize,
+    },
     /// Compaction completed.
     CompactionEnd {
+        /// Compaction statistics if successful.
         stats: Option<CompactionStats>,
+        /// Error message if failed.
         error: Option<String>,
     },
     /// Steer/follow-up queue length changed.
     QueueUpdate {
+        /// Number of steer messages queued.
         steer_len: usize,
+        /// Number of follow-up messages queued.
         follow_up_len: usize,
     },
     /// Session writes flushed.
-    SavePoint { entries_flushed: usize },
+    SavePoint {
+        /// Number of entries flushed.
+        entries_flushed: usize,
+    },
     /// A branch was forked.
     BranchForked {
+        /// Source entry ID.
         from: EntryId,
+        /// New leaf entry ID.
         new_leaf: EntryId,
+        /// Optional branch label.
         label: Option<String>,
     },
     /// Branch cursor was switched.
-    BranchSwitched { from: EntryId, to: EntryId },
+    BranchSwitched {
+        /// Previous entry ID.
+        from: EntryId,
+        /// New entry ID.
+        to: EntryId,
+    },
     /// A branch was deleted.
-    BranchDeleted { leaf: EntryId },
+    BranchDeleted {
+        /// Leaf entry ID of the deleted branch.
+        leaf: EntryId,
+    },
     /// A branch summary was generated and persisted.
-    BranchSummarized { leaf: EntryId, summary: String },
+    BranchSummarized {
+        /// Leaf entry ID of the branch.
+        leaf: EntryId,
+        /// Branch summary text.
+        summary: String,
+    },
     /// A tool call started.
     ToolCallStart {
+        /// Tool call ID.
         tool_use_id: String,
+        /// Tool name.
         tool_name: String,
+        /// Tool arguments (JSON).
         args: serde_json::Value,
     },
     /// A tool call completed.
     ToolCallEnd {
+        /// Tool call ID.
         tool_use_id: String,
+        /// Tool name.
         tool_name: String,
+        /// Tool call result.
         result: HarnessToolCallResult,
     },
     /// All queued activity finished.
