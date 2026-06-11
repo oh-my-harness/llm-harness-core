@@ -31,6 +31,9 @@ async fn run(client: Arc<dyn LlmClient>) -> anyhow::Result<()> {
 如果工具需要文件系统、shell、权限或 sandbox 策略，由 runtime 层实现
 `ExecutionEnv` 后通过 `AgentOptions::new_with_env` 或 `AgentOptions::with_env` 注入。
 
+如果想看一个真实 provider 的完整命令行示例，参考
+`examples/deepseek-agent`。
+
 ## 什么时候改用 AgentHarness
 
 当你需要持久化 session、branch 操作、compaction、skills/templates 或

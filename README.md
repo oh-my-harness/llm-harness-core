@@ -95,9 +95,12 @@ $env:LLM_HARNESS_PROMPT="Say hello from llm-harness."
 更多说明见
 `examples/deepseek-agent/README.md`。
 
+示例索引见 `examples/README.md`。
+
 ## 设计文档
 
 - SDK 指南：`docs/sdk/README.md`
+- SDK 核心概念：`docs/sdk/concepts.md`
 - Core 设计：`docs/superpowers/specs/2026-06-07-llm-harness-core-design.md`
 - Core/runtime SDK 边界：
   `docs/superpowers/specs/2026-06-10-core-runtime-sdk-boundary-design.md`
