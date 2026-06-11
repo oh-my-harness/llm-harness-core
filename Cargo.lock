@@ -707,6 +707,7 @@ dependencies = [
  "futures",
  "llm-harness-loop",
  "llm-harness-types",
+ "llm_adapter",
  "serde",
  "serde_json",
  "tempfile",

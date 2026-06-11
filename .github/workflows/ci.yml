@@ -32,6 +32,9 @@ jobs:
       - name: Check workspace
         run: cargo check --workspace
 
+      - name: Check examples
+        run: cargo check --workspace --examples
+
       - name: Test workspace
         run: cargo test --workspace --features test-utils
 

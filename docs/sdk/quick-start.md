@@ -11,11 +11,11 @@ harness 相同的 `Tool` 抽象。
 ```rust
 use std::sync::Arc;
 
-use llm_harness::prelude::{Agent, AgentOptions, ExecutionEnv};
+use llm_harness::prelude::{Agent, AgentOptions};
 use llm_harness_loop::LlmClient;
 
-async fn run(client: Arc<dyn LlmClient>, env: Arc<dyn ExecutionEnv>) -> anyhow::Result<()> {
-    let mut opts = AgentOptions::new("my-model", env);
+async fn run(client: Arc<dyn LlmClient>) -> anyhow::Result<()> {
+    let mut opts = AgentOptions::new("my-model");
     opts.system_prompt = Some("You are a helpful assistant.".into());
 
     let agent = Agent::new(client, opts);
@@ -27,8 +27,9 @@ async fn run(client: Arc<dyn LlmClient>, env: Arc<dyn ExecutionEnv>) -> anyhow::
 ```
 
 具体如何构造 client 取决于 `llm-api-adapter`。Core 只接收
-`Arc<dyn LlmClient>`，不负责 provider 凭证发现。执行环境同样由 runtime 层注入：
-core 只依赖 `Arc<dyn ExecutionEnv>`，不提供真实 OS、shell、权限或 sandbox 策略。
+`Arc<dyn LlmClient>`，不负责 provider 凭证发现。没有工具的 Agent 不需要执行环境；
+如果工具需要文件系统、shell、权限或 sandbox 策略，由 runtime 层实现
+`ExecutionEnv` 后通过 `AgentOptions::new_with_env` 或 `AgentOptions::with_env` 注入。
 
 ## 什么时候改用 AgentHarness
 

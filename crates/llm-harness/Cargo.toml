@@ -21,5 +21,6 @@ uuid.workspace              = true
 test-utils = ["llm-harness-loop/test-utils"]
 
 [dev-dependencies]
+llm_adapter.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

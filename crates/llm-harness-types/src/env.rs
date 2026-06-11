@@ -145,6 +145,153 @@ pub trait ExecutionEnv: Send + Sync {
     fn cleanup<'a>(&'a self) -> BoxFuture<'a, Result<(), EnvError>>;
 }
 
+/// Execution environment placeholder for agents that do not run tools.
+///
+/// All file-system and shell operations return `EnvError::Other`. Runtime crates
+/// should inject their own [`ExecutionEnv`] when tools need workspace access.
+#[derive(Debug, Clone)]
+pub struct UnsupportedEnv {
+    working_dir: PathBuf,
+}
+
+impl UnsupportedEnv {
+    /// Create an unsupported environment rooted at the current relative path.
+    pub fn new() -> Self {
+        Self {
+            working_dir: PathBuf::from("."),
+        }
+    }
+
+    /// Create an unsupported environment with a custom working directory label.
+    pub fn with_working_dir(working_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            working_dir: working_dir.into(),
+        }
+    }
+
+    fn unsupported<'a, T: Send + 'a>() -> BoxFuture<'a, Result<T, EnvError>> {
+        Box::pin(async {
+            Err(EnvError::Other(
+                "execution environment is not available".into(),
+            ))
+        })
+    }
+}
+
+impl Default for UnsupportedEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExecutionEnv for UnsupportedEnv {
+    fn working_dir(&self) -> &Path {
+        &self.working_dir
+    }
+
+    fn read_text_file<'a>(
+        &'a self,
+        _path: &'a Path,
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<String, EnvError>> {
+        Self::unsupported()
+    }
+
+    fn read_text_lines<'a>(
+        &'a self,
+        _path: &'a Path,
+        _max_lines: Option<usize>,
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<Vec<String>, EnvError>> {
+        Self::unsupported()
+    }
+
+    fn read_binary_file<'a>(
+        &'a self,
+        _path: &'a Path,
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<Vec<u8>, EnvError>> {
+        Self::unsupported()
+    }
+
+    fn write_file<'a>(
+        &'a self,
+        _path: &'a Path,
+        _content: &'a [u8],
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<(), EnvError>> {
+        Self::unsupported()
+    }
+
+    fn append_file<'a>(
+        &'a self,
+        _path: &'a Path,
+        _content: &'a [u8],
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<(), EnvError>> {
+        Self::unsupported()
+    }
+
+    fn file_info<'a>(
+        &'a self,
+        _path: &'a Path,
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<FileInfo, EnvError>> {
+        Self::unsupported()
+    }
+
+    fn list_dir<'a>(
+        &'a self,
+        _path: &'a Path,
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<Vec<FileInfo>, EnvError>> {
+        Self::unsupported()
+    }
+
+    fn exists<'a>(
+        &'a self,
+        _path: &'a Path,
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<bool, EnvError>> {
+        Self::unsupported()
+    }
+
+    fn create_dir<'a>(
+        &'a self,
+        _path: &'a Path,
+        _recursive: bool,
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<(), EnvError>> {
+        Self::unsupported()
+    }
+
+    fn remove<'a>(
+        &'a self,
+        _path: &'a Path,
+        _recursive: bool,
+        _force: bool,
+        _abort: CancellationToken,
+    ) -> BoxFuture<'a, Result<(), EnvError>> {
+        Self::unsupported()
+    }
+
+    fn create_temp_dir<'a>(&'a self, _prefix: &'a str) -> BoxFuture<'a, Result<PathBuf, EnvError>> {
+        Self::unsupported()
+    }
+
+    fn execute_shell<'a>(
+        &'a self,
+        _cmd: &'a str,
+        _opts: ShellOptions<'a>,
+    ) -> BoxFuture<'a, Result<ShellOutput, EnvError>> {
+        Self::unsupported()
+    }
+
+    fn cleanup<'a>(&'a self) -> BoxFuture<'a, Result<(), EnvError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +320,15 @@ mod tests {
     #[test]
     fn execution_env_is_object_safe() {
         fn _accepts(_: &dyn ExecutionEnv) {}
+    }
+
+    #[test]
+    fn unsupported_env_reports_unavailable_operations() {
+        let env = UnsupportedEnv::new();
+        let err = futures::executor::block_on(
+            env.read_text_file(Path::new("README.md"), CancellationToken::new()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not available"));
     }
 }

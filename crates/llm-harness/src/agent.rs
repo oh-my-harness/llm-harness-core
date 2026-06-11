@@ -104,10 +104,11 @@ pub struct AgentOptions {
 }
 
 impl AgentOptions {
-    pub fn new(model: impl Into<String>, env: Arc<dyn ExecutionEnv>) -> Self {
+    /// Create options for an agent that does not need tool environment access.
+    pub fn new(model: impl Into<String>) -> Self {
         Self {
             model: model.into(),
-            env,
+            env: Arc::new(UnsupportedEnv::new()),
             max_tokens: DEFAULT_MAX_TOKENS,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             model_info: None,
@@ -115,6 +116,17 @@ impl AgentOptions {
             tools: vec![],
             system_prompt: None,
         }
+    }
+
+    /// Create options with an execution environment for tools.
+    pub fn new_with_env(model: impl Into<String>, env: Arc<dyn ExecutionEnv>) -> Self {
+        Self::new(model).with_env(env)
+    }
+
+    /// Set the execution environment used by tools.
+    pub fn with_env(mut self, env: Arc<dyn ExecutionEnv>) -> Self {
+        self.env = env;
+        self
     }
 }
 
@@ -473,15 +485,14 @@ impl Agent {
 #[cfg(feature = "test-utils")]
 mod tests {
     use super::*;
-    use llm_harness_loop::test_utils::{MockLlmClient, MockResponse, NoOpEnv};
+    use llm_harness_loop::test_utils::{MockLlmClient, MockResponse};
     use std::sync::Arc;
 
     fn make_agent(responses: Vec<MockResponse>) -> Agent {
         let client = Arc::new(MockLlmClient::new(responses));
-        let env = Arc::new(NoOpEnv);
         Agent::new(
             client as Arc<dyn LlmClient>,
-            AgentOptions::new("test-model", env),
+            AgentOptions::new("test-model"),
         )
     }
 
