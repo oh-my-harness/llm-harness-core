@@ -198,7 +198,7 @@ impl Agent {
             content: vec![ContentBlock::Text { text }],
             timestamp: chrono::Utc::now(),
         });
-        self.run_with_initial(vec![user_msg], false).await
+        self.run_with_initial(vec![user_msg], false, false).await
     }
 
     /// Start a new run with an explicit message list, replacing the current transcript.
@@ -206,7 +206,7 @@ impl Agent {
         &self,
         messages: Vec<AgentMessage>,
     ) -> Result<(), AgentError> {
-        self.run_with_initial(messages, false).await
+        self.run_with_initial(messages, false, true).await
     }
 
     /// Continue the current transcript without injecting new messages.
@@ -214,7 +214,7 @@ impl Agent {
     /// Uses `agent_loop_continue` which drains stale steer messages before the
     /// first LLM call.
     pub async fn continue_run(&self) -> Result<(), AgentError> {
-        self.run_with_initial(vec![], true).await
+        self.run_with_initial(vec![], true, false).await
     }
 
     /// Clear messages and runtime state, preserving model/tools/system_prompt.
@@ -354,6 +354,7 @@ impl Agent {
         &self,
         initial: Vec<AgentMessage>,
         is_continue: bool,
+        replace_transcript: bool,
     ) -> Result<(), AgentError> {
         // 1. Transition to Running; snapshot config; create channels + abort token.
         let (ctx, config) = {
@@ -369,16 +370,10 @@ impl Agent {
             // Extend transcript with initial messages (or replace for prompt_with_messages).
             if is_continue {
                 // continue_run: use existing messages as-is
+            } else if replace_transcript {
+                inner.state.messages = initial.clone();
             } else if !initial.is_empty() {
-                // prompt: check if caller replaced transcript or appended
-                // prompt_with_messages passes the full desired history as initial;
-                // prompt passes [user_msg] which we append.
-                if initial.len() == 1 && matches!(initial[0], AgentMessage::User(_)) {
-                    inner.state.messages.extend(initial.iter().cloned());
-                } else {
-                    // full message set — replace transcript
-                    inner.state.messages = initial.clone();
-                }
+                inner.state.messages.extend(initial.iter().cloned());
             }
 
             let (steer_rx, follow_up_rx) = inner.reset_channels();
@@ -624,6 +619,36 @@ mod tests {
             state.messages.len(),
             2,
             "steer message should have been cleared"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompt_with_messages_single_user_replaces_transcript() {
+        let agent = make_agent(vec![
+            MockResponse::text("first response"),
+            MockResponse::text("second response"),
+        ]);
+
+        // Build up an existing transcript
+        agent.prompt("first prompt").await.unwrap();
+        let before_len = agent.state().messages.len();
+
+        // Single-user message should REPLACE, not append
+        let single_user = vec![AgentMessage::User(UserMessage {
+            content: vec![ContentBlock::Text {
+                text: "clean start".into(),
+            }],
+            timestamp: chrono::Utc::now(),
+        })];
+        agent.prompt_with_messages(single_user).await.unwrap();
+
+        let state = agent.state();
+        // Correct: transcript replaced → 1 user + 1 assistant = 2 total
+        // Bug: transcript appended → before_len + 2 messages
+        assert_eq!(
+            state.messages.len(),
+            2,
+            "single-user prompt_with_messages must replace transcript (was {before_len} before)"
         );
     }
 }
