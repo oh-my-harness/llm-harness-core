@@ -1547,6 +1547,10 @@ impl AgentHarness {
         result: CompactionResult,
         path: &[SessionEntry],
     ) -> Result<CompactionStats, HarnessError> {
+        if !path.iter().any(|e| e.id == result.first_kept_entry) {
+            return Err(CompactionError::InvalidFirstKeptEntry(result.first_kept_entry).into());
+        }
+
         let tokens_before = result.tokens_before;
         let tokens_after = result.tokens_after;
         let compressed_entries = path
@@ -1974,6 +1978,57 @@ mod tests {
             received_name.lock().unwrap().as_deref(),
             Some("my_tool"),
             "ToolCallEnd must carry the correct tool_name"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_override_with_invalid_first_kept_entry_returns_error() {
+        use futures::future::BoxFuture;
+        use llm_harness_types::{
+            BeforeCompactCtx, BeforeCompactDecision, BeforeCompactHook, CompactionResult, EntryId,
+        };
+
+        struct BadOverrideHook;
+
+        impl BeforeCompactHook for BadOverrideHook {
+            fn before_compact<'a>(
+                &'a self,
+                _ctx: BeforeCompactCtx<'a>,
+            ) -> BoxFuture<'a, BeforeCompactDecision> {
+                Box::pin(async move {
+                    BeforeCompactDecision::Override(CompactionResult {
+                        summary_message: AgentMessage::User(UserMessage {
+                            content: vec![ContentBlock::Text {
+                                text: "summary".into(),
+                            }],
+                            timestamp: chrono::Utc::now(),
+                        }),
+                        first_kept_entry: EntryId::new(),
+                        tokens_before: 100,
+                        tokens_after: 10,
+                        file_operations: vec![],
+                    })
+                })
+            }
+        }
+
+        let client = Arc::new(MockLlmClient::new(vec![MockResponse::text("hello")]));
+        let env = Arc::new(NoOpEnv);
+        let mut opts = AgentHarnessOptions::new("test-model");
+        opts.hooks.before_compact = Some(Arc::new(BadOverrideHook));
+        let h = futures::executor::block_on(AgentHarness::new_in_memory(client, env, opts));
+
+        h.prompt("hello").await.unwrap();
+
+        let err = h.compact().await;
+        assert!(
+            matches!(
+                err,
+                Err(HarnessError::Compaction(
+                    CompactionError::InvalidFirstKeptEntry(_)
+                ))
+            ),
+            "compact() must return InvalidFirstKeptEntry for a nonexistent entry: {err:?}"
         );
     }
 }

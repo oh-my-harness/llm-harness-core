@@ -139,6 +139,8 @@ pub enum CompactionError {
     InsufficientTokens,
     #[error("summary model call failed: {0}")]
     SummaryFailed(String),
+    #[error("first_kept_entry {0} not found in compaction path")]
+    InvalidFirstKeptEntry(crate::EntryId),
     #[error(transparent)]
     Session(#[from] SessionError),
     #[error(transparent)]
