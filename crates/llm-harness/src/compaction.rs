@@ -536,7 +536,7 @@ fn parse_file_op_kind(kind: &str) -> Option<FileOpKind> {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use chrono::Utc;
     use llm_harness_loop::test_utils::MockLlmClient;

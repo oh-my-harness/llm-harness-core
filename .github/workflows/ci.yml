@@ -35,6 +35,9 @@ jobs:
       - name: Check examples
         run: cargo check -p deepseek-agent-example
 
+      - name: Check tests compile without optional features
+        run: cargo test --workspace --no-run
+
       - name: Test workspace
         run: cargo test --workspace --features test-utils
 
