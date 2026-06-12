@@ -366,20 +366,15 @@ impl PrepareNextTurnHook for DefaultPrepareNextTurn {
     ) -> futures::future::BoxFuture<'a, Result<NextTurnDirective, AgentError>> {
         Box::pin(async move {
             // Short lock: read current config, then release immediately.
-            let (model, thinking_level, tools) = {
+            let (model, thinking_level, tools, active_tools) = {
                 let g = self.inner.lock().unwrap();
                 let st = &g.state;
-                let active_tools_set = st.active_tools.as_ref();
-                let tools: Vec<Arc<dyn Tool>> = match active_tools_set {
-                    Some(names) => st
-                        .tools
-                        .iter()
-                        .filter(|t| names.contains(t.name()))
-                        .cloned()
-                        .collect(),
-                    None => st.tools.clone(),
-                };
-                (st.model.clone(), st.thinking_level, tools)
+                (
+                    st.model.clone(),
+                    st.thinking_level,
+                    st.tools.clone(),
+                    st.active_tools.clone(),
+                )
             };
 
             let mut directive = NextTurnDirective {
@@ -387,7 +382,7 @@ impl PrepareNextTurnHook for DefaultPrepareNextTurn {
                 model: Some(model),
                 thinking_level: Some(thinking_level),
                 tools: Some(tools),
-                active_tools: None,
+                active_tools,
             };
 
             // Chain user-provided hook: its non-None fields win.
@@ -1195,22 +1190,12 @@ impl AgentHarness {
         let st = &inner.state;
         let retry = inner.retry.clone();
 
-        // Filter tools by active_tools subset.
-        let tools: Vec<Arc<dyn Tool>> = match &st.active_tools {
-            Some(names) => st
-                .tools
-                .iter()
-                .filter(|t| names.contains(t.name()))
-                .cloned()
-                .collect(),
-            None => st.tools.clone(),
-        };
-
         // Wrap tools with HookedTool if needed.
         let before = self.hooks.before_tool_call.clone();
         let after = self.hooks.after_tool_call.clone();
         let tools: Vec<Arc<dyn Tool>> = if before.is_some() || after.is_some() {
-            tools
+            st.tools
+                .clone()
                 .into_iter()
                 .map(|t| {
                     Arc::new(HookedTool {
@@ -1221,7 +1206,7 @@ impl AgentHarness {
                 })
                 .collect()
         } else {
-            tools
+            st.tools.clone()
         };
 
         // Build the default prepare_next_turn wrapper.
@@ -1236,6 +1221,7 @@ impl AgentHarness {
             temperature: None,
             thinking_level: st.thinking_level,
             tools,
+            active_tools: st.active_tools.clone(),
             default_execution_mode: ToolExecutionMode::Parallel,
             env: self.env.clone(),
             abort,

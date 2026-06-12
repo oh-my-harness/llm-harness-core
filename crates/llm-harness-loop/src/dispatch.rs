@@ -51,8 +51,6 @@ pub(crate) async fn execute_tool_batch(
     let mut results: Vec<Option<(String, Result<ToolResult, ToolError>)>> =
         (0..n).map(|_| None).collect();
 
-    let calls = Arc::new(calls);
-
     for group in groups {
         let futures: Vec<_> = group
             .iter()

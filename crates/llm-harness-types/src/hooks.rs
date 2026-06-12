@@ -156,7 +156,10 @@ pub trait ShouldStopHook: Send + Sync {
 
 /// LLM provider 请求前拦截 hook；可原地修改传输层配置。
 pub trait BeforeProviderRequestHook: Send + Sync {
-    /// 在 LLM 调用前修改 `StreamOptions`（可修改 timeout、headers 等）。
+    /// 在 LLM 调用前修改 `StreamOptions`。
+    ///
+    /// 当前 loop 直接应用 timeout/retry 字段；headers、metadata 和 cache 配置需要
+    /// provider adapter 支持 per-request 传输配置后才能透传。
     fn before_request<'a>(&'a self, opts: &'a mut StreamOptions) -> BoxFuture<'a, ()>;
 }
 

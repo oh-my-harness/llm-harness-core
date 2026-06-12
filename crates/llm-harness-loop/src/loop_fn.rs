@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use futures::{Stream, StreamExt};
 use llm_adapter::provider::Provider;
@@ -15,6 +15,52 @@ fn thinking_budget(level: ThinkingLevel) -> Option<u32> {
         ThinkingLevel::High => Some(32_000),
         ThinkingLevel::XHigh => Some(64_000),
     }
+}
+
+fn active_tool_subset(
+    tools: &[Arc<dyn Tool>],
+    active: &Option<HashSet<String>>,
+) -> Result<Vec<Arc<dyn Tool>>, AgentError> {
+    let Some(active) = active else {
+        return Ok(tools.to_vec());
+    };
+
+    if let Some(name) = active
+        .iter()
+        .find(|name| !tools.iter().any(|tool| tool.name() == name.as_str()))
+    {
+        return Err(AgentError::Internal(format!(
+            "active tool '{name}' is not registered"
+        )));
+    }
+
+    Ok(tools
+        .iter()
+        .filter(|tool| active.contains(tool.name()))
+        .cloned()
+        .collect())
+}
+
+fn apply_next_turn_directive(
+    ctx: &mut AgentContext,
+    config: &mut LoopConfig,
+    active_tools: &mut Option<HashSet<String>>,
+    directive: NextTurnDirective,
+) -> Result<(), AgentError> {
+    if let Some(new_ctx) = directive.context {
+        *ctx = new_ctx;
+    }
+    if let Some(model) = directive.model {
+        config.model = model;
+    }
+    if let Some(level) = directive.thinking_level {
+        config.thinking_level = level;
+    }
+    if let Some(tools) = directive.tools {
+        config.tools = tools;
+    }
+    *active_tools = directive.active_tools;
+    active_tool_subset(&config.tools, active_tools).map(|_| ())
 }
 
 /// Start an agent loop from a new context.
@@ -61,6 +107,7 @@ fn run_loop(
 
         let mut turn_index: u32 = 0;
         let mut new_messages: Vec<AgentMessage> = vec![];
+        let mut active_tools = config.active_tools.clone();
 
         'main: loop {
             // Check abort
@@ -104,7 +151,14 @@ fn run_loop(
                 }
             };
 
-            let tool_defs = tools_to_defs(&config.tools);
+            let current_tools = match active_tool_subset(&config.tools, &active_tools) {
+                Ok(tools) => tools,
+                Err(e) => {
+                    yield AgentEvent::Error(e);
+                    break 'main;
+                }
+            };
+            let tool_defs = tools_to_defs(&current_tools);
             let tool_choice =
                 if tool_defs.is_empty() { ToolChoice::None } else { ToolChoice::Auto };
 
@@ -125,21 +179,46 @@ fn run_loop(
             if let Some(h) = &config.before_provider_request {
                 h.before_request(&mut stream_opts).await;
             }
-            let _ = stream_opts; // currently not forwarded to adapter; reserved for future use
 
             // Call LLM (with optional retry on transient errors)
             let mut handle = {
                 use crate::config::{is_retryable, RetryConfig};
-                let retry = config.retry.as_ref().cloned().unwrap_or(RetryConfig {
+                let mut retry = config.retry.as_ref().cloned().unwrap_or(RetryConfig {
                     max_retries: 0,
                     base_delay_ms: 0,
                 });
+                if let Some(max_retries) = stream_opts.max_retries {
+                    retry.max_retries = max_retries;
+                }
                 let mut attempt = 0u32;
                 loop {
-                    match client.chat_stream(&req).await {
+                    let call = client.chat_stream(&req);
+                    let response = if let Some(timeout_ms) = stream_opts.timeout_ms {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_millis(timeout_ms),
+                            call,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(_) => {
+                                yield AgentEvent::Error(AgentError::Provider(format!(
+                                    "provider request timed out after {timeout_ms}ms"
+                                )));
+                                break 'main;
+                            }
+                        }
+                    } else {
+                        call.await
+                    };
+
+                    match response {
                         Ok(h) => break h,
                         Err(e) if is_retryable(&e) && retry.can_retry(attempt) => {
-                            let delay = retry.delay_for(attempt, &e);
+                            let mut delay = retry.delay_for(attempt, &e);
+                            if let Some(max_delay_ms) = stream_opts.max_retry_delay_ms {
+                                delay = delay.min(std::time::Duration::from_millis(max_delay_ms));
+                            }
                             tokio::time::sleep(delay).await;
                             attempt += 1;
                         }
@@ -217,15 +296,17 @@ fn run_loop(
                     })
                     .collect();
 
-                // Match tool calls to registered tools
+                // Match tool calls to registered tools.
+                let tools_by_name: std::collections::HashMap<&str, Arc<dyn Tool>> = current_tools
+                    .iter()
+                    .map(|tool| (tool.name(), tool.clone()))
+                    .collect();
                 let calls: Vec<(String, serde_json::Value, Arc<dyn Tool>)> = tool_calls
                     .iter()
                     .filter_map(|(id, name, args)| {
-                        config
-                            .tools
-                            .iter()
-                            .find(|t| t.name() == name)
-                            .map(|t| (id.clone(), args.clone(), t.clone()))
+                        tools_by_name
+                            .get(name.as_str())
+                            .map(|tool| (id.clone(), args.clone(), tool.clone()))
                     })
                     .collect();
 
@@ -252,11 +333,11 @@ fn run_loop(
                 let abort = config.abort.clone();
                 let turn_idx = turn_index;
 
-                // Create a shared update channel whose receiver outlives the batch,
-                // so tool send calls don't fail with a disconnected-channel error.
-                let (update_tx, _update_rx) = mpsc::channel::<ToolResult>(64);
+                // Aggregate per-tool update channels so partial tool results can be
+                // tagged with their originating tool_use_id before being emitted.
+                let (update_tx, mut update_rx) = mpsc::channel::<(String, ToolResult)>(64);
 
-                let mut results = execute_tool_batch(
+                let batch = execute_tool_batch(
                     calls,
                     {
                         let env = env.clone();
@@ -264,19 +345,58 @@ fn run_loop(
                         let assistant_arc = assistant_arc.clone();
                         let update_tx = update_tx.clone();
                         move |tool_use_id| {
+                            let (tool_update_tx, mut tool_update_rx) =
+                                mpsc::channel::<ToolResult>(16);
+                            let aggregate_tx = update_tx.clone();
+                            let update_tool_use_id = tool_use_id.clone();
+                            tokio::spawn(async move {
+                                while let Some(partial) = tool_update_rx.recv().await {
+                                    if aggregate_tx
+                                        .send((update_tool_use_id.clone(), partial))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            });
+
                             ToolContext {
                                 env: env.clone(),
                                 abort: abort.clone(),
                                 tool_use_id,
                                 turn_index: turn_idx,
                                 assistant_message: assistant_arc.clone(),
-                                update_tx: update_tx.clone(),
+                                update_tx: tool_update_tx,
                             }
                         }
                     },
                     config.default_execution_mode,
-                )
-                .await;
+                );
+                drop(update_tx);
+                futures::pin_mut!(batch);
+
+                let mut results = loop {
+                    tokio::select! {
+                        biased;
+
+                        Some((tool_use_id, partial)) = update_rx.recv() => {
+                            yield AgentEvent::ToolExecutionUpdate {
+                                tool_use_id,
+                                partial,
+                            };
+                        }
+                        batch_results = &mut batch => {
+                            break batch_results;
+                        }
+                    }
+                };
+                while let Some((tool_use_id, partial)) = update_rx.recv().await {
+                    yield AgentEvent::ToolExecutionUpdate {
+                        tool_use_id,
+                        partial,
+                    };
+                }
 
                 // Append synthetic error results for any tool calls not matched to a
                 // registered tool; leaving orphan ToolUse blocks causes a provider 400.
@@ -326,12 +446,19 @@ fn run_loop(
                         last_tool_results: &results,
                     }).await {
                         Ok(directive) => {
-                            if let Some(new_ctx) = directive.context { ctx = new_ctx; }
-                            if let Some(m) = directive.model { config.model = m; }
-                            if let Some(level) = directive.thinking_level { config.thinking_level = level; }
-                            if let Some(tools) = directive.tools { config.tools = tools; }
-                            if let Some(active) = directive.active_tools {
-                                config.tools.retain(|t| active.contains(t.name()));
+                            if let Err(e) = apply_next_turn_directive(
+                                &mut ctx,
+                                &mut config,
+                                &mut active_tools,
+                                directive,
+                            ) {
+                                yield AgentEvent::Error(e);
+                                yield AgentEvent::TurnEnd {
+                                    index: turn_index,
+                                    message: assistant_msg,
+                                    tool_results: results,
+                                };
+                                break 'main;
                             }
                         }
                         Err(e) => {
@@ -399,12 +526,14 @@ fn run_loop(
                     last_tool_results: &[],
                 }).await {
                     Ok(directive) => {
-                        if let Some(new_ctx) = directive.context { ctx = new_ctx; }
-                        if let Some(m) = directive.model { config.model = m; }
-                        if let Some(level) = directive.thinking_level { config.thinking_level = level; }
-                        if let Some(tools) = directive.tools { config.tools = tools; }
-                        if let Some(active) = directive.active_tools {
-                            config.tools.retain(|t| active.contains(t.name()));
+                        if let Err(e) = apply_next_turn_directive(
+                            &mut ctx,
+                            &mut config,
+                            &mut active_tools,
+                            directive,
+                        ) {
+                            yield AgentEvent::Error(e);
+                            break 'main;
                         }
                     }
                     Err(e) => {
@@ -424,14 +553,44 @@ fn run_loop(
 #[cfg(test)]
 #[cfg(feature = "test-utils")]
 mod tests {
+    use super::{active_tool_subset, apply_next_turn_directive};
+
     use crate::test_utils::{MockLlmClient, MockResponse, NoOpEnv};
     use crate::{DefaultConvertToLlm, LoopConfig, agent_loop, agent_loop_continue};
     use futures::StreamExt;
     use futures::future::BoxFuture;
     use llm_adapter::provider::Provider;
     use llm_harness_types::*;
+    use std::collections::HashSet;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
+
+    struct NamedTool(&'static str);
+    impl Tool for NamedTool {
+        fn name(&self) -> &str {
+            self.0
+        }
+        fn description(&self) -> &str {
+            ""
+        }
+        fn parameters_schema(&self) -> &serde_json::Value {
+            static S: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            S.get_or_init(|| serde_json::json!({}))
+        }
+        fn execute<'a>(
+            &'a self,
+            _: serde_json::Value,
+            _: &'a ToolContext,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            Box::pin(async {
+                Ok(ToolResult {
+                    content: vec![],
+                    details: serde_json::Value::Null,
+                    terminate: false,
+                })
+            })
+        }
+    }
 
     fn make_config(responses: Vec<MockResponse>) -> (Arc<MockLlmClient>, LoopConfig) {
         let client = Arc::new(MockLlmClient::new(responses));
@@ -441,6 +600,7 @@ mod tests {
             temperature: None,
             thinking_level: ThinkingLevel::Off,
             tools: vec![],
+            active_tools: None,
             default_execution_mode: ToolExecutionMode::Parallel,
             env: Arc::new(NoOpEnv),
             abort: CancellationToken::new(),
@@ -457,6 +617,60 @@ mod tests {
             retry: None,
         };
         (client, cfg)
+    }
+
+    #[test]
+    fn active_tool_subset_filters_without_dropping_registered_tools() {
+        let tools: Vec<Arc<dyn Tool>> =
+            vec![Arc::new(NamedTool("read")), Arc::new(NamedTool("write"))];
+        let active = Some(HashSet::from(["read".to_string()]));
+
+        let subset = active_tool_subset(&tools, &active).unwrap();
+
+        assert_eq!(subset.len(), 1);
+        assert_eq!(subset[0].name(), "read");
+        assert_eq!(tools.len(), 2, "registered tool set must remain intact");
+    }
+
+    #[test]
+    fn active_tool_subset_rejects_unknown_tool_names() {
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(NamedTool("read"))];
+        let active = Some(HashSet::from(["missing".to_string()]));
+
+        match active_tool_subset(&tools, &active) {
+            Err(AgentError::Internal(message)) => assert!(message.contains("missing")),
+            Err(err) => panic!("unexpected error: {err:?}"),
+            Ok(_) => panic!("unknown active tool should be rejected"),
+        }
+    }
+
+    #[test]
+    fn directive_active_tools_none_restores_all_tools() {
+        let mut cfg = make_config(vec![]).1;
+        cfg.tools = vec![Arc::new(NamedTool("read")), Arc::new(NamedTool("write"))];
+        let mut ctx = AgentContext {
+            system_prompt: None,
+            messages: vec![],
+        };
+        let mut active = Some(HashSet::from(["read".to_string()]));
+
+        apply_next_turn_directive(
+            &mut ctx,
+            &mut cfg,
+            &mut active,
+            NextTurnDirective {
+                context: None,
+                model: None,
+                thinking_level: None,
+                tools: None,
+                active_tools: None,
+            },
+        )
+        .unwrap();
+
+        let subset = active_tool_subset(&cfg.tools, &active).unwrap();
+        assert!(active.is_none());
+        assert_eq!(subset.len(), 2);
     }
 
     #[tokio::test]
@@ -577,6 +791,73 @@ mod tests {
             .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }))
             .count();
         assert_eq!(tool_exec_ends, 1);
+    }
+
+    #[tokio::test]
+    async fn tool_partial_updates_are_emitted() {
+        struct UpdatingTool;
+        impl Tool for UpdatingTool {
+            fn name(&self) -> &str {
+                "update"
+            }
+            fn description(&self) -> &str {
+                ""
+            }
+            fn parameters_schema(&self) -> &serde_json::Value {
+                static S: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+                S.get_or_init(|| serde_json::json!({}))
+            }
+            fn execute<'a>(
+                &'a self,
+                _: serde_json::Value,
+                ctx: &'a ToolContext,
+            ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+                Box::pin(async move {
+                    ctx.update_tx
+                        .send(ToolResult {
+                            content: vec![ContentBlock::Text {
+                                text: "partial".into(),
+                            }],
+                            details: serde_json::json!({"step": 1}),
+                            terminate: false,
+                        })
+                        .await
+                        .unwrap();
+
+                    Ok(ToolResult {
+                        content: vec![ContentBlock::Text {
+                            text: "done".into(),
+                        }],
+                        details: serde_json::Value::Null,
+                        terminate: true,
+                    })
+                })
+            }
+        }
+
+        let (client_raw, mut cfg) = make_config(vec![MockResponse::tool_use("c1", "update", "{}")]);
+        cfg.tools = vec![Arc::new(UpdatingTool)];
+        let client: Arc<dyn Provider> = Arc::clone(&client_raw) as Arc<dyn Provider>;
+
+        let events: Vec<AgentEvent> = agent_loop(
+            client,
+            AgentContext {
+                system_prompt: None,
+                messages: vec![],
+            },
+            cfg,
+        )
+        .collect()
+        .await;
+
+        assert!(events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolExecutionUpdate { tool_use_id, partial }
+                    if tool_use_id == "c1"
+                        && matches!(&partial.content[0], ContentBlock::Text { text } if text == "partial")
+            )
+        }));
     }
 
     #[tokio::test]

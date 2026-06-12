@@ -400,6 +400,7 @@ impl Agent {
                 temperature: None,
                 thinking_level: snapshot.thinking_level,
                 tools: snapshot.tools,
+                active_tools: None,
                 default_execution_mode: ToolExecutionMode::Parallel,
                 env: self.env.clone(),
                 abort,

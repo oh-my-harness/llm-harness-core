@@ -68,7 +68,9 @@ pub(crate) fn content_block_to_response(cb: &ContentBlock) -> Option<ResponseCon
                 input: input.clone(),
             }))
         }
-        ContentBlock::Image { .. } => None,
+        ContentBlock::Image { .. } => Some(ResponseContent::Text(
+            "[image omitted: assistant image content is not supported in provider history]".into(),
+        )),
     }
 }
 
@@ -212,6 +214,21 @@ mod tests {
         let r = content_block_to_response(&cb);
         assert!(
             matches!(r, Some(ResponseContent::ToolInvocation(ti)) if ti.id == "c1" && ti.name == "bash")
+        );
+    }
+
+    #[test]
+    fn content_block_image_to_response_placeholder() {
+        let cb = ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: "AA==".into(),
+            },
+        };
+        let r = content_block_to_response(&cb);
+        assert!(
+            matches!(r, Some(ResponseContent::Text(text)) if text.contains("image omitted")),
+            "assistant image blocks should not be silently dropped"
         );
     }
 }

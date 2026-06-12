@@ -46,6 +46,9 @@ pub struct TurnSnapshot {
 }
 
 /// 传递给 LLM provider 的传输层配置；可被 `BeforeProviderRequestHook` 覆盖。
+///
+/// 当前 loop 会直接应用 `timeout_ms`、`max_retries` 和 `max_retry_delay_ms`。
+/// 其余字段保留给支持 per-request 传输配置的 provider adapter。
 #[derive(Debug, Clone, Default)]
 pub struct StreamOptions {
     /// 请求超时（毫秒）；`None` 表示无超时。
@@ -54,11 +57,11 @@ pub struct StreamOptions {
     pub max_retries: Option<u32>,
     /// 重试最大延迟（毫秒）；`None` 表示使用 provider 默认值。
     pub max_retry_delay_ms: Option<u64>,
-    /// 附加的 HTTP 请求头。
+    /// 附加的 HTTP 请求头；需要 provider adapter 支持后才能透传。
     pub headers: Vec<(String, String)>,
-    /// 厂商特定的元数据（透传给 provider）。
+    /// 厂商特定的元数据；需要 provider adapter 支持后才能透传。
     pub metadata: serde_json::Value,
-    /// 厂商特定的缓存配置（透传给 provider）。
+    /// 厂商特定的缓存配置；需要 provider adapter 支持后才能透传。
     pub cache_config: Option<serde_json::Value>,
 }
 

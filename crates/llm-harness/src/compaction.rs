@@ -1,3 +1,5 @@
+use std::{fmt::Write as _, path::PathBuf};
+
 use chrono::Utc;
 use llm_harness_loop::LlmMessage;
 use llm_harness_loop::{ChatRequest, LlmClient, RequestContent};
@@ -11,6 +13,7 @@ use crate::session::types::{CompactionEntry, SessionEntry, SessionEntryPayload};
 /// Tokens estimated per character (rough 4-char-per-token approximation).
 const CHARS_PER_TOKEN: usize = 4;
 
+/// System prompt used by the summary model during compaction.
 const SUMMARIZATION_SYSTEM_PROMPT: &str = "\
 You are a context summarization assistant. Your task is to read a conversation \
 between a user and an AI coding assistant, then produce a structured summary \
@@ -23,6 +26,7 @@ Be concise but complete. Preserve:\n\
 - Critical technical details (file paths, function names, error messages)\n\
 - The immediate next steps\n";
 
+/// User-facing instructions appended to each compaction summary request.
 const SUMMARY_REQUEST: &str = "\
 Create a structured context checkpoint summary using this format:\n\
 \n\
@@ -201,6 +205,9 @@ pub fn prepare_compaction(
 
     let first_kept_entry = compactable[valid_cut].id;
     let cut_point = first_kept_entry;
+    let split_turn_prefix = (valid_cut < cut_relative)
+        .then(|| compactable[valid_cut..cut_relative].to_vec())
+        .filter(|entries| !entries.is_empty());
 
     // Extract previous summary from last compaction for iterative update.
     let previous_summary = last_compaction.and_then(|lc| {
@@ -216,6 +223,7 @@ pub fn prepare_compaction(
     let prev_first_kept = last_compaction
         .map(|lc| lc.first_kept_entry)
         .unwrap_or(path[0].id);
+    let file_operations = extract_file_operations(&compactable[..valid_cut]);
 
     Some(CompactionPreparation {
         path_entries: path.to_vec(),
@@ -223,8 +231,8 @@ pub fn prepare_compaction(
         cut_point,
         previous_summary,
         estimated_tokens,
-        split_turn_prefix: None,
-        file_operations: vec![],
+        split_turn_prefix,
+        file_operations,
     })
 }
 
@@ -245,6 +253,7 @@ fn is_valid_cut_start(entry: &SessionEntry) -> bool {
         SessionEntryPayload::Message(AgentMessage::User(_))
             | SessionEntryPayload::Message(AgentMessage::CompactionSummary(_))
             | SessionEntryPayload::Message(AgentMessage::BranchSummary(_))
+            | SessionEntryPayload::Compaction(_)
     )
 }
 
@@ -266,7 +275,12 @@ pub async fn compact(
         .path_entries
         .iter()
         .position(|e| e.id == preparation.cut_point)
-        .unwrap_or(preparation.path_entries.len());
+        .ok_or_else(|| {
+            CompactionError::SummaryFailed(format!(
+                "cut point {} not found in compaction path",
+                preparation.cut_point
+            ))
+        })?;
 
     // For second+ compaction, only compress entries since the previous kept boundary,
     // not the entire path (those earlier entries are already captured in previous_summary).
@@ -274,7 +288,12 @@ pub async fn compact(
         .path_entries
         .iter()
         .position(|e| e.id == preparation.first_kept_entry)
-        .unwrap_or(0);
+        .ok_or_else(|| {
+            CompactionError::SummaryFailed(format!(
+                "first kept entry {} not found in compaction path",
+                preparation.first_kept_entry
+            ))
+        })?;
 
     let entries_to_compress = &preparation.path_entries[first_kept_idx..cut_idx];
 
@@ -333,6 +352,14 @@ pub async fn compact(
         ));
     }
 
+    let split_note = preparation.split_turn_prefix.is_some().then(|| {
+        "## Compaction Note\n\
+         The cut point was moved backward to the nearest turn boundary; \
+         extra entries before the requested token boundary were included in this \
+         summary to preserve message ordering."
+            .to_string()
+    });
+
     // Append file operations summary if any.
     let full_summary = if preparation.file_operations.is_empty() {
         summary_text
@@ -346,6 +373,11 @@ pub async fn compact(
             "{summary_text}\n\n## Files Touched\n{}",
             file_lines.join("\n")
         )
+    };
+    let full_summary = if let Some(note) = split_note {
+        format!("{full_summary}\n\n{note}")
+    } else {
+        full_summary
     };
 
     let summary_message = AgentMessage::CompactionSummary(CompactionSummaryMessage {
@@ -376,46 +408,56 @@ pub async fn compact(
 ///
 /// Only message and model-change entries are rendered; other entry types are skipped.
 pub(crate) fn format_entries_as_text(entries: &[SessionEntry]) -> String {
-    let mut parts: Vec<String> = Vec::new();
+    let mut out = String::new();
 
     for entry in entries {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+
         match &entry.payload {
             SessionEntryPayload::Message(msg) => {
-                parts.push(format_message(msg));
+                append_message_text(&mut out, msg);
             }
             SessionEntryPayload::ModelChange { to, .. } => {
-                parts.push(format!("[Config] Model changed to: {to}"));
+                write!(&mut out, "[Config] Model changed to: {to}")
+                    .expect("writing to String cannot fail");
             }
-            _ => {}
+            _ => {
+                let new_len = out.len().saturating_sub(2);
+                out.truncate(new_len);
+            }
         }
     }
 
-    parts.join("\n\n")
+    out
 }
 
-fn format_message(msg: &AgentMessage) -> String {
+fn append_message_text(out: &mut String, msg: &AgentMessage) {
     match msg {
         AgentMessage::User(u) => {
             let text = content_blocks_to_text(&u.content);
-            format!("[User]\n{text}")
+            write!(out, "[User]\n{text}").expect("writing to String cannot fail");
         }
         AgentMessage::Assistant(a) => {
             let text = content_blocks_to_text(&a.content);
-            format!("[Assistant]\n{text}")
+            write!(out, "[Assistant]\n{text}").expect("writing to String cannot fail");
         }
         AgentMessage::ToolResult(t) => {
             let text = content_blocks_to_text(&t.content);
             let status = if t.is_error { " (error)" } else { "" };
-            format!("[Tool Result{status}]\n{text}")
+            write!(out, "[Tool Result{status}]\n{text}").expect("writing to String cannot fail");
         }
         AgentMessage::CompactionSummary(cs) => {
-            format!("[Previous Summary]\n{}", cs.summary)
+            write!(out, "[Previous Summary]\n{}", cs.summary)
+                .expect("writing to String cannot fail");
         }
         AgentMessage::BranchSummary(bs) => {
-            format!("[Branch Summary]\n{}", bs.summary)
+            write!(out, "[Branch Summary]\n{}", bs.summary).expect("writing to String cannot fail");
         }
         AgentMessage::Custom(c) => {
-            format!("[Custom: {}]\n{}", c.r#type, c.data)
+            write!(out, "[Custom: {}]\n{}", c.r#type, c.data)
+                .expect("writing to String cannot fail");
         }
     }
 }
@@ -433,11 +475,71 @@ fn content_blocks_to_text(blocks: &[ContentBlock]) -> String {
         .join("\n")
 }
 
+fn extract_file_operations(entries: &[SessionEntry]) -> Vec<FileOperation> {
+    let mut out = Vec::new();
+
+    for entry in entries {
+        match &entry.payload {
+            SessionEntryPayload::Custom { data, .. } => {
+                extract_file_operations_from_value(data, entry.id, &mut out);
+            }
+            SessionEntryPayload::Message(AgentMessage::Custom(custom)) => {
+                extract_file_operations_from_value(&custom.data, entry.id, &mut out);
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn extract_file_operations_from_value(
+    value: &serde_json::Value,
+    entry_id: EntryId,
+    out: &mut Vec<FileOperation>,
+) {
+    if let Some(items) = value.get("file_operations").and_then(|v| v.as_array()) {
+        for item in items {
+            if let Some(op) = parse_file_operation(item, entry_id) {
+                out.push(op);
+            }
+        }
+        return;
+    }
+
+    if let Some(op) = parse_file_operation(value, entry_id) {
+        out.push(op);
+    }
+}
+
+fn parse_file_operation(value: &serde_json::Value, entry_id: EntryId) -> Option<FileOperation> {
+    let path = value.get("path")?.as_str()?;
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .and_then(parse_file_op_kind)?;
+
+    Some(FileOperation {
+        path: PathBuf::from(path),
+        kind,
+        at_entry: entry_id,
+    })
+}
+
+fn parse_file_op_kind(kind: &str) -> Option<FileOpKind> {
+    match kind {
+        "read" | "Read" => Some(FileOpKind::Read),
+        "modify" | "modified" | "write" | "Write" | "Modify" => Some(FileOpKind::Modify),
+        _ => None,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use llm_harness_loop::test_utils::MockLlmClient;
     use llm_harness_types::*;
 
     use crate::session::types::{SessionEntry, SessionEntryPayload};
@@ -471,6 +573,49 @@ mod tests {
                 usage: tokens,
                 error_message: None,
             })),
+        }
+    }
+
+    fn custom_entry(id: EntryId, data: serde_json::Value) -> SessionEntry {
+        SessionEntry {
+            id,
+            parent_id: None,
+            timestamp: Utc::now(),
+            payload: SessionEntryPayload::Custom {
+                custom_type: "file_operations".into(),
+                data,
+            },
+        }
+    }
+
+    fn model_change_entry(id: EntryId) -> SessionEntry {
+        SessionEntry {
+            id,
+            parent_id: None,
+            timestamp: Utc::now(),
+            payload: SessionEntryPayload::ModelChange {
+                to: "new-model".into(),
+                provider: None,
+                model_id: None,
+            },
+        }
+    }
+
+    fn compaction_entry(id: EntryId) -> SessionEntry {
+        SessionEntry {
+            id,
+            parent_id: None,
+            timestamp: Utc::now(),
+            payload: SessionEntryPayload::Compaction(CompactionEntry {
+                summary_message: AgentMessage::CompactionSummary(CompactionSummaryMessage {
+                    summary: "summary".into(),
+                    timestamp: Utc::now(),
+                }),
+                first_kept_entry: id,
+                tokens_before: 100,
+                from_hook: false,
+                details: None,
+            }),
         }
     }
 
@@ -524,6 +669,20 @@ mod tests {
     }
 
     #[test]
+    fn estimate_tokens_for_entry_counts_messages_only() {
+        assert_eq!(
+            estimate_tokens_for_entry(&model_change_entry(EntryId::new())),
+            0
+        );
+        assert!(estimate_tokens_for_entry(&user_entry(EntryId::new(), "hello")) > 0);
+    }
+
+    #[test]
+    fn compaction_entry_is_valid_cut_start() {
+        assert!(is_valid_cut_start(&compaction_entry(EntryId::new())));
+    }
+
+    #[test]
     fn compaction_triggered_when_over_threshold() {
         // Force large token counts via usage field.
         let path = vec![
@@ -537,6 +696,87 @@ mod tests {
         assert!(
             prep.is_some(),
             "should trigger compaction when over threshold"
+        );
+    }
+
+    #[test]
+    fn prepare_compaction_extracts_file_operations_from_custom_entries() {
+        let file_entry_id = EntryId::new();
+        let path = vec![
+            user_entry(EntryId::new(), "a"),
+            custom_entry(
+                file_entry_id,
+                serde_json::json!({
+                    "file_operations": [
+                        { "path": "src/lib.rs", "kind": "read" },
+                        { "path": "src/main.rs", "kind": "modify" }
+                    ]
+                }),
+            ),
+            assistant_entry(EntryId::new(), "b", Some(big_token_usage(1400))),
+            user_entry(EntryId::new(), "recent"),
+        ];
+
+        let prep = prepare_compaction(&path, None, &settings(), &model_info()).unwrap();
+
+        assert_eq!(prep.file_operations.len(), 2);
+        assert_eq!(prep.file_operations[0].path, PathBuf::from("src/lib.rs"));
+        assert!(matches!(prep.file_operations[0].kind, FileOpKind::Read));
+        assert_eq!(prep.file_operations[0].at_entry, file_entry_id);
+        assert_eq!(prep.file_operations[1].path, PathBuf::from("src/main.rs"));
+        assert!(matches!(prep.file_operations[1].kind, FileOpKind::Modify));
+    }
+
+    #[test]
+    fn prepare_compaction_marks_split_turn_boundary_downgrade() {
+        let u1 = EntryId::new();
+        let a1 = EntryId::new();
+        let u2 = EntryId::new();
+        let path = vec![
+            user_entry(u1, "old question"),
+            assistant_entry(a1, "large answer", Some(big_token_usage(900))),
+            user_entry(u2, "recent question"),
+            assistant_entry(EntryId::new(), "recent answer", Some(big_token_usage(900))),
+        ];
+
+        let prep = prepare_compaction(&path, None, &settings(), &model_info()).unwrap();
+
+        assert_eq!(prep.cut_point, u2);
+        let split = prep
+            .split_turn_prefix
+            .expect("boundary adjustment should be visible");
+        assert_eq!(split[0].id, u2);
+    }
+
+    #[tokio::test]
+    async fn compact_errors_when_first_kept_entry_is_missing() {
+        let path = vec![
+            user_entry(EntryId::new(), "old"),
+            assistant_entry(EntryId::new(), "large", Some(big_token_usage(1400))),
+            user_entry(EntryId::new(), "recent"),
+        ];
+        let cut_point = path[2].id;
+        let client = MockLlmClient::new(vec![]);
+
+        let err = compact(
+            &client,
+            CompactionPreparation {
+                path_entries: path,
+                first_kept_entry: EntryId::new(),
+                cut_point,
+                previous_summary: Some("previous".into()),
+                estimated_tokens: 1400,
+                split_turn_prefix: None,
+                file_operations: vec![],
+            },
+            &settings(),
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(err, CompactionError::SummaryFailed(message) if message.contains("first kept entry"))
         );
     }
 

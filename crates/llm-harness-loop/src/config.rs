@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::time::Duration;
+use std::{collections::HashSet, sync::Arc};
 
 use llm_adapter::LlmError;
 use llm_harness_types::*;
@@ -9,6 +9,24 @@ use tokio_util::sync::CancellationToken;
 use crate::convert::ConvertToLlmHook;
 
 // ── RetryConfig ───────────────────────────────────────────────────────────────
+
+/// Static metadata about an LLM model.
+///
+/// Runtime and harness layers use this for context-window and compaction
+/// decisions without depending directly on the provider adapter crate.
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    /// Provider name, for example `"deepseek"` or `"openai"`.
+    pub provider: Option<String>,
+    /// Provider API family, for example `"openai-compatible"`.
+    pub api: Option<String>,
+    /// Provider-specific model identifier.
+    pub model_id: Option<String>,
+    /// Total context window size in tokens.
+    pub context_window: u32,
+    /// Maximum output tokens supported by this model.
+    pub max_tokens: u32,
+}
 
 /// Retry configuration for transient LLM provider errors.
 #[derive(Debug, Clone)]
@@ -77,6 +95,8 @@ pub struct LoopConfig {
     // === Tools ===
     /// 活跃工具列表（通常接收已包装的 `HookedTool`）。
     pub tools: Vec<Arc<dyn Tool>>,
+    /// Optional active-tool subset. `None` means all registered tools are available.
+    pub active_tools: Option<HashSet<String>>,
     /// 工具的默认执行模式。
     pub default_execution_mode: ToolExecutionMode,
 
@@ -87,7 +107,11 @@ pub struct LoopConfig {
     pub abort: CancellationToken,
 
     // === Stream options ===
-    /// 传输层配置（目前不直接传递给 adapter，但为将来保留）。
+    /// 传输层配置。
+    ///
+    /// 当前 loop 本地执行 `timeout_ms`、`max_retries` 和 `max_retry_delay_ms`。
+    /// `headers`、`metadata` 和 `cache_config` 需要 provider adapter 暴露相应入口后
+    /// 才能透传。
     pub stream_options: StreamOptions,
 
     // === Required hooks ===
@@ -136,6 +160,7 @@ mod tests {
             temperature: None,
             thinking_level: ThinkingLevel::Off,
             tools: vec![],
+            active_tools: None,
             default_execution_mode: ToolExecutionMode::Parallel,
             env: Arc::new(NoOpEnv),
             abort: CancellationToken::new(),

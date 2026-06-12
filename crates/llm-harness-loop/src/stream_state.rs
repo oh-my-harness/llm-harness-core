@@ -110,11 +110,16 @@ impl StreamingState {
             }
             AdapterEvent::ContentStop { index } => {
                 if let Some((id, _, args)) = self.tool_blocks.get(&index) {
-                    let parsed = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
-                    vec![AgentEvent::ToolCallEnd {
+                    let (parsed, parse_error) = parse_tool_args(id, args);
+                    let mut events = Vec::new();
+                    if let Some(err) = parse_error {
+                        events.push(err);
+                    }
+                    events.push(AgentEvent::ToolCallEnd {
                         tool_use_id: id.clone(),
                         args: parsed,
-                    }]
+                    });
+                    events
                 } else {
                     vec![]
                 }
@@ -125,6 +130,7 @@ impl StreamingState {
                     content,
                     stop_reason: Some(convert_stop_reason(stop_reason)),
                     timestamp: Utc::now(),
+                    // The current adapter stream does not expose provider/api metadata.
                     provider: None,
                     api: None,
                     model: Some(self.model.clone()),
@@ -145,6 +151,7 @@ impl StreamingState {
             content: self.build_final_content(),
             stop_reason: None,
             timestamp: Utc::now(),
+            // The current adapter stream does not expose provider/api metadata.
             provider: None,
             api: None,
             model: Some(self.model.clone()),
@@ -156,9 +163,6 @@ impl StreamingState {
     fn build_final_content(&self) -> Vec<ContentBlock> {
         let mut indexed: Vec<(usize, ContentBlock)> = Vec::new();
         for (idx, kind) in &self.block_order {
-            if indexed.iter().any(|(i, _)| i == idx) {
-                continue;
-            }
             let cb = match kind {
                 BlockKind::Text => {
                     let text = self.text_blocks.get(idx).cloned().unwrap_or_default();
@@ -173,7 +177,12 @@ impl StreamingState {
                 }
                 BlockKind::Tool => {
                     if let Some((id, name, args)) = self.tool_blocks.get(idx) {
-                        let input = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+                        let input = serde_json::from_str(args).unwrap_or_else(|err| {
+                            serde_json::json!({
+                                "_parse_error": err.to_string(),
+                                "raw": args,
+                            })
+                        });
                         ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
@@ -188,6 +197,18 @@ impl StreamingState {
         }
         indexed.sort_by_key(|(i, _)| *i);
         indexed.into_iter().map(|(_, cb)| cb).collect()
+    }
+}
+
+fn parse_tool_args(tool_use_id: &str, args: &str) -> (serde_json::Value, Option<AgentEvent>) {
+    match serde_json::from_str(args) {
+        Ok(value) => (value, None),
+        Err(err) => (
+            serde_json::Value::Null,
+            Some(AgentEvent::Error(AgentError::Internal(format!(
+                "failed to parse tool args for {tool_use_id}: {err}"
+            )))),
+        ),
     }
 }
 
@@ -297,6 +318,32 @@ mod tests {
         assert!(
             matches!(&events[0], AgentEvent::ToolCallEnd { tool_use_id, args }
                 if tool_use_id == "c1" && args["cmd"] == "ls")
+        );
+    }
+
+    #[test]
+    fn invalid_tool_args_emit_diagnostic_before_tool_call_end() {
+        let mut s = make_state();
+        s.process(AdapterEvent::ContentStart {
+            index: 0,
+            kind: ContentKind::ToolInvocation {
+                id: "c1".into(),
+                name: "bash".into(),
+            },
+        });
+        s.process(AdapterEvent::ToolDelta {
+            index: 0,
+            arguments: r#"{"cmd":"ls""#.into(),
+        });
+        let events = s.process(AdapterEvent::ContentStop { index: 0 });
+
+        assert!(
+            matches!(&events[0], AgentEvent::Error(AgentError::Internal(msg))
+            if msg.contains("failed to parse tool args for c1"))
+        );
+        assert!(
+            matches!(&events[1], AgentEvent::ToolCallEnd { tool_use_id, args }
+            if tool_use_id == "c1" && args.is_null())
         );
     }
 
