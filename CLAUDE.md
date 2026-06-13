@@ -213,3 +213,7 @@ llm-harness-loop → llm-harness-types
   - scope：crate 名或模块名，如 `types`、`loop`、`harness`、`session`
   - 示例：`feat(loop): implement tool batch dispatch`、`test(session): add branch fork tests`
 - description 说明 *为什么* 而非 *做了什么*。
+
+## 收尾
+
+每次开发完成后：提交并推送本仓库变更；如有进度变化同步更新顶层 `STATUS.md` 并推送 `oh-my-harness/oh-my-harness`。
