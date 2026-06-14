@@ -57,6 +57,7 @@ pub struct HarnessState {
 // ── HarnessHooks ──────────────────────────────────────────────────────────────
 
 /// Collection of optional hooks injected into an [`AgentHarness`].
+#[derive(Clone)]
 pub struct HarnessHooks {
     /// Called once at the start of a `prompt()` run.
     pub before_run: Option<Arc<dyn BeforeRunHook>>,
